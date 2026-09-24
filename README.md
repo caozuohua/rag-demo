@@ -84,35 +84,38 @@ uv run python rag_retrieval_lab.py
 ```
 
 首次运行 Demo 2 会自动下载 bge-small-zh 向量模型（约 100MB）；之后索引持久化，秒级启动。
-实验脚本会复用 Demo 2 建好的索引，并首次下载 bge-reranker-base（约 278MB）。
+实验脚本自带语料、建到独立索引目录（不复用 Demo 2 的库），首次运行会下载 bge-reranker-base（约 278MB）并向量化 56 条语料。
 
 ## 检索优化实验
 
-`rag_retrieval_lab.py` 用带 ground truth 的评测集，量化对比四种检索配置的排序质量。全程不加载 LLM，秒级跑完。
+`rag_retrieval_lab.py` 自带一份约 56 条、覆盖 10 个主题簇的语料（故意塞入大量"硬负例"——与答案共享词汇但并非答案的文档），用带 ground truth 的评测集量化对比四种检索配置。全程不加载 LLM，秒级跑完。语料与索引目录（`./data/llamaindex_lab_store`）独立于两个 Demo，互不影响。
 
 ### 四种配置
 
 | 配置 | 检索链路 |
 |---|---|
 | A. baseline | 向量检索 Top-3（Demo 2 方案，对照组） |
-| B. +rerank | 向量 Top-8 → bge-reranker 重排 → Top-3 |
-| C. +hybrid | 向量 Top-8 + BM25 Top-8 → RRF 融合 → Top-3 |
-| D. hybrid+rerank | 向量 + BM25 → RRF 融合 Top-8 → reranker 重排 → Top-3 |
+| B. +rerank | 向量 Top-10 → bge-reranker 重排 → Top-3 |
+| C. +hybrid | 向量 Top-10 + BM25 Top-10 → RRF 融合 → Top-3 |
+| D. hybrid+rerank | 向量 + BM25 → RRF 融合 Top-10 → reranker 重排 → Top-3 |
 
-### 实测结果（8 条知识库）
+### 实测结果（56 条语料，23 条正样本查询）
 
 | 配置 | Hit@3 | Recall@3 | MRR@3 |
 |---|---|---|---|
-| A. baseline | 100% | 100% | 0.950 |
-| B. +rerank | 100% | 100% | 1.000 |
-| C. +hybrid | 100% | 100% | 1.000 |
-| D. hybrid+rerank | 100% | 100% | 1.000 |
+| A. baseline | 95.7% | 85.1% | 0.891 |
+| B. +rerank | 100.0% | 93.1% | 0.971 |
+| C. +hybrid | 95.7% | 88.8% | 0.891 |
+| D. hybrid+rerank | 100.0% | 93.1% | 0.971 |
 
 ### 关键结论
 
-1. **小数据下只有 MRR 有区分度**：8 条知识、候选池≈全集，Hit@3 与 Recall@3 全部饱和在 100%，真正体现差异的是 MRR@3（排序质量）。baseline 把"长期记忆"查询的相关文档排到了第 2 位，B/C/D 都修正到第 1 位。
-2. **要观察召回率差异，必须扩充知识库**：候选池远大于 Top-K 时，Recall 才有下降空间，reranker/混合检索的价值才真正显现。
-3. **融合必须用 RRF 而非分数相加**：向量分数是 0~1 余弦相似度，BM25 分数是 0~5+ 的 TF-IDF 权重，量纲不同，`SIMPLE` 模式直接相加会让 BM25 完全主导。`QueryFusionRetriever(mode="reciprocal_rerank")` 只用排名融合，规避此问题。
+1. **reranker 是最大功臣**：Hit@3 95.7%→100%、Recall@3 85.1%→93.1%、MRR@3 0.891→0.971。典型例子"本地没有GPU怎么跑大模型"（答案 `llama.cpp`）：向量检索被"本地/大模型"带偏到模型本身（Llama3、Qwen），完全漏掉；reranker 用 cross-encoder 精读 query 与文档，理解了"怎么跑"指向推理引擎，把它从榜外捞回第 1 位。
+2. **纯 BM25 混合检索收益有限**：Recall 仅 +3.6%，Hit/MRR 不变。因为中文 query 多是语义改写（"没有GPU跑大模型" vs 文档里的"C++实现的LLM推理引擎"），字面词几乎不重叠，BM25 抓不到。它的价值在专有名词、精确术语匹配的场景。
+3. **hybrid+rerank 与单独 rerank 打平**：reranker 足够强时，初检多召回的候选被它重新排序吸收，混合检索的边际贡献消失。说明工程上"向量 Top-N + reranker"往往就是性价比最高的组合。
+4. **数据量决定能否看出差异**：上一版只有 8 条时 Hit/Recall 全饱和在 100%，只能靠 MRR 挤牙膏；扩到 56 条并加入硬负例后，差距才真实显现。检索实验的信噪比，首先取决于语料规模与负例质量。
+
+> 诚实提示：个别"多答案"查询（如"中文Embedding模型有哪些"期望 4 篇）受 Top-3 坑位限制，Recall@3 有 75% 的结构性天花板，并非检索失败。
 
 ## 配置项（环境变量）
 
@@ -120,6 +123,7 @@ uv run python rag_retrieval_lab.py
 |---|---|---|
 | `CHROMA_PATH` | `./data/chroma_db` | Chroma 持久化目录 |
 | `LLAMAINDEX_PATH` | `./data/llamaindex_store` | LlamaIndex 索引持久化目录 |
+| `LLAMAINDEX_LAB_PATH` | `./data/llamaindex_lab_store` | 检索实验的独立索引目录 |
 | `MODEL_PATH` | `./models/qwen2.5-1.5b-instruct-q4_k_m.gguf` | GGUF 模型路径 |
 | `MODEL_DIR` | `./models` | download_model.py 的下载目录 |
 | `HF_ENDPOINT` | 无 | 国内网络设为 `https://hf-mirror.com` 加速 HuggingFace 下载 |
