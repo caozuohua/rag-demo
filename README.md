@@ -2,12 +2,13 @@
 
 最小可运行的本地 RAG（检索增强生成）练手项目，全程离线、无需 API Key、clone 即跑。
 
-包含两个渐进式 Demo：
+包含两个渐进式 Demo，外加一个检索优化实验：
 
 | 文件 | 技术栈 | 生成方式 | 定位 |
 |---|---|---|---|
 | `rag_demo.py` | Chroma + ONNX MiniLM | 无 LLM，仅检索展示 | 理解向量检索环节 |
 | `rag_demo_llamaindex.py` | LlamaIndex + bge-small-zh + llama.cpp (Qwen2.5) | 本地 LLM 生成完整回答 | 端到端 RAG 链路 |
+| `rag_retrieval_lab.py` | LlamaIndex + bge-reranker + BM25 | 无 LLM，纯检索评估 | 量化对比检索/重排/混合策略 |
 
 ## 核心理念
 
@@ -43,6 +44,8 @@ llama.cpp 加载 Qwen2.5-1.5B-Instruct GGUF (1GB, CPU) 生成回答
 | 相似度语义 | `distances` 余弦**距离**（越小越好，`1-dist` 转相似度） | `node.score` 相似**度**（越大越好） |
 | Embedding | `DefaultEmbeddingFunction`（MiniLM，英文为主） | `HuggingFaceEmbedding("BAAI/bge-small-zh-v1.5")`（中文优化） |
 | LLM | 无 | `LlamaCPP`（llama.cpp 本地推理） |
+| 关键词检索 | 无 | `BM25Retriever`（bm25s，需自定义中文分词，见踩坑 9） |
+| 重排 Rerank | 无 | `SentenceTransformerRerank`（bge-reranker-base，见踩坑 10） |
 
 ## 快速开始
 
@@ -75,9 +78,41 @@ uv run python rag_demo.py
 
 # Demo 2：端到端 RAG（LlamaIndex + 本地 LLM，CPU 推理每题约 10-30 秒）
 uv run python rag_demo_llamaindex.py
+
+# 实验：检索优化对比（纯检索，不加载 LLM，秒级完成）
+uv run python rag_retrieval_lab.py
 ```
 
 首次运行 Demo 2 会自动下载 bge-small-zh 向量模型（约 100MB）；之后索引持久化，秒级启动。
+实验脚本会复用 Demo 2 建好的索引，并首次下载 bge-reranker-base（约 278MB）。
+
+## 检索优化实验
+
+`rag_retrieval_lab.py` 用带 ground truth 的评测集，量化对比四种检索配置的排序质量。全程不加载 LLM，秒级跑完。
+
+### 四种配置
+
+| 配置 | 检索链路 |
+|---|---|
+| A. baseline | 向量检索 Top-3（Demo 2 方案，对照组） |
+| B. +rerank | 向量 Top-8 → bge-reranker 重排 → Top-3 |
+| C. +hybrid | 向量 Top-8 + BM25 Top-8 → RRF 融合 → Top-3 |
+| D. hybrid+rerank | 向量 + BM25 → RRF 融合 Top-8 → reranker 重排 → Top-3 |
+
+### 实测结果（8 条知识库）
+
+| 配置 | Hit@3 | Recall@3 | MRR@3 |
+|---|---|---|---|
+| A. baseline | 100% | 100% | 0.950 |
+| B. +rerank | 100% | 100% | 1.000 |
+| C. +hybrid | 100% | 100% | 1.000 |
+| D. hybrid+rerank | 100% | 100% | 1.000 |
+
+### 关键结论
+
+1. **小数据下只有 MRR 有区分度**：8 条知识、候选池≈全集，Hit@3 与 Recall@3 全部饱和在 100%，真正体现差异的是 MRR@3（排序质量）。baseline 把"长期记忆"查询的相关文档排到了第 2 位，B/C/D 都修正到第 1 位。
+2. **要观察召回率差异，必须扩充知识库**：候选池远大于 Top-K 时，Recall 才有下降空间，reranker/混合检索的价值才真正显现。
+3. **融合必须用 RRF 而非分数相加**：向量分数是 0~1 余弦相似度，BM25 分数是 0~5+ 的 TF-IDF 权重，量纲不同，`SIMPLE` 模式直接相加会让 BM25 完全主导。`QueryFusionRetriever(mode="reciprocal_rerank")` 只用排名融合，规避此问题。
 
 ## 配置项（环境变量）
 
@@ -150,6 +185,28 @@ set HF_ENDPOINT=https://hf-mirror.com
 
 对 bge 向量模型和 GGUF 模型下载都有效（download_model.py 内部已默认设置）。
 
+### 9. BM25 中文检索必须自定义分词，否则得分全为 0
+
+`BM25Retriever` 默认 `token_pattern=r"(?u)\b\w\w+\b"`。中文字符属于 `\w` 且词间无空格，整句会被切成**单个 token**，中文查询几乎无法匹配，实测 BM25 得分全部为 0。
+
+解决：传"中文按单字 + 英文按词"的正则，并跳过英文词干化：
+
+```python
+BM25Retriever.from_defaults(
+    index=index,
+    token_pattern=r"[\u4e00-\u9fff]|[a-zA-Z0-9_]+",  # 中文单字 + 英文词
+    skip_stemming=True,                              # 中文场景 stemming 无意义
+)
+```
+
+单字切分对中文召回足够（BM25 靠多字重合打分），若要更精准可上 jieba 分词，但会新增依赖。
+
+### 10. reranker 输出的是 logits，不是概率
+
+`SentenceTransformerRerank` 用的 bge-reranker 输出范围约 -10~+10（cross-encoder logits），**不是** 0~1 的相似度。直接按 `{score:.2%}` 打印会出现"350%"这类荒谬值。
+
+处理：分数只用于**排序**；需要展示"置信度"时套一层 sigmoid 归一化。它与向量检索的余弦相似度不可直接比较。
+
 ## 常见问题
 
 **Q：检索相似度只有 60-70%，是不是太低？**
@@ -167,6 +224,7 @@ bge 的余弦相似度分布本身偏低，0.6+ 对中文短文本已是较强�
 rag-demo/
 ├── rag_demo.py               # Demo 1: Chroma 纯检索
 ├── rag_demo_llamaindex.py    # Demo 2: LlamaIndex 端到端 RAG
+├── rag_retrieval_lab.py      # 实验: 检索优化对比（reranker + BM25）
 ├── download_model.py         # GGUF 模型下载脚本
 ├── pyproject.toml            # 项目元数据与依赖（uv 管理）
 ├── .gitignore
