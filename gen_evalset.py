@@ -28,10 +28,16 @@ import argparse
 import glob
 import json
 import os
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()  # 优先读项目根 .env；已有同名环境变量则不覆盖
+# 路径一律锚定项目根，不依赖运行时 CWD（从别的目录执行也不会写错位置）
+PROJECT_ROOT = Path(__file__).resolve().parent
+EVALSET_PATH = PROJECT_ROOT / "evalset.json"
+
+load_dotenv(PROJECT_ROOT / ".env")  # 优先读项目根 .env；已有同名环境变量则不覆盖
 
 from langchain_core.documents import Document  # noqa: E402
 from langchain_huggingface import HuggingFaceEmbeddings  # noqa: E402
@@ -130,8 +136,13 @@ def resolve_local_model(model_name: str):
     candidates = [
         os.getenv("HF_HOME"),
         os.path.expanduser("~/.cache/huggingface/hub"),
-        os.path.join(os.getenv("LOCALAPPDATA", ""), "llama_index"),
     ]
+    # LlamaIndex 把模型下到自己的缓存目录；该位置只在 Windows 下存在，
+    # 非 Windows 直接跳过，避免退化成相对路径去扫 CWD
+    if sys.platform == "win32":
+        candidates.append(
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "llama_index")
+        )
     for root in filter(None, candidates):
         # snapshot 目录需同时含 config.json 与模型权重才算完整
         pattern = os.path.join(root, "**", dir_tag, "snapshots", "*")
@@ -153,6 +164,15 @@ def generate(size: int, probe: bool = False):
             "（注意 PowerShell 里 set 命令不设置环境变量，详见 README 踩坑 12）"
         )
 
+    # 环境变量是非可信输入，直接 int() 会在非数字时报裸 ValueError，这里给明确提示
+    try:
+        max_tokens = int(os.getenv("GLM_MAX_TOKENS", "8192"))
+    except ValueError:
+        raise SystemExit(
+            "❌ GLM_MAX_TOKENS 必须是整数，当前值无法解析为数字，"
+            "请检查环境变量或项目根 .env"
+        )
+
     print(f"🔌 出题模型：{GLM_MODEL} @ {GLM_BASE_URL}")
     # max_tokens 必须给足：GLM-4.5-Air 是推理模型，thinking token 会吃掉输出预算，
     # 默认上限下 JSON 答案被截断 -> finish_reason="length" -> ragas 判为未完成，
@@ -163,7 +183,7 @@ def generate(size: int, probe: bool = False):
             base_url=GLM_BASE_URL,
             api_key=api_key,
             temperature=0.3,  # 出题要稳定可复现，压低温度
-            max_tokens=int(os.getenv("GLM_MAX_TOKENS", "8192")),
+            max_tokens=max_tokens,
         )
     )
 
@@ -238,12 +258,12 @@ def generate(size: int, probe: bool = False):
     for q in NEGATIVE_QUERIES:
         eval_set.append({"query": q, "expected": [], "synthesizer": "manual_negative"})
 
-    with open("evalset.json", "w", encoding="utf-8") as f:
+    with open(EVALSET_PATH, "w", encoding="utf-8") as f:
         json.dump(eval_set, f, ensure_ascii=False, indent=2)
 
     print(f"✅ 生成完成：正样本 {len(eval_set) - len(NEGATIVE_QUERIES)} 条"
           f"（丢弃无法映射的 {dropped} 条）+ 负样本 {len(NEGATIVE_QUERIES)} 条")
-    print("📄 已写入 evalset.json，rag_retrieval_lab.py 下次运行自动加载")
+    print(f"📄 已写入 {EVALSET_PATH}，rag_retrieval_lab.py 下次运行自动加载")
 
 
 def main():

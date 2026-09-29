@@ -15,9 +15,9 @@ RAG Demo - LlamaIndex 版本（本地 LLM RAG 完整版）
   (无 LLM)                   -> LlamaCPP（llama.cpp + Qwen2.5 GGUF）
 
 依赖安装：
-  uv add llama-index-core llama-index-embeddings-huggingface llama-index-llms-llama-cpp
-  # llama-cpp-python 用预编译 wheel，避免本地编译：
-  uv pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+  uv sync
+  # 依赖（含 llama-cpp-python 预编译 wheel 源）已在 pyproject.toml 声明，
+  # 无需再手工 uv pip install，见 README 踩坑 7
 运行：
   uv run python rag_demo_llamaindex.py
 首次运行会下载 bge-small-zh 中文向量模型（约 100MB）；
@@ -36,22 +36,33 @@ from llama_index.core import (
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.llama_cpp import LlamaCPP
 
-# 本地中文向量模型：句子级语义 Embedding，CPU 可跑，无需 API Key
-# 与原版的 all-MiniLM 相比，bge-small-zh 对中文知识库检索效果更好
-Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-zh-v1.5")
-
-# 本地 LLM：llama.cpp 加载 Qwen2.5-1.5B-Instruct GGUF
-# MODEL_PATH 走环境变量，默认指向 download_model.py 下载的模型
+# 本地 LLM 路径走环境变量，默认指向 download_model.py 下载的模型
 MODEL_PATH = os.getenv("MODEL_PATH", "./models/qwen2.5-1.5b-instruct-q4_k_m.gguf")
-Settings.llm = LlamaCPP(
-    model_path=MODEL_PATH,
-    temperature=0.3,        # 降到 0.3 抑制小模型的发散与循环
-    max_new_tokens=512,     # 答案长度上限，避免无限生成
-    context_window=4096,    # 4K 上下文足够装下检索片段+问题+答案
-    model_kwargs={"n_gpu_layers": 0},  # 纯 CPU；有 GPU 可调大让 llama.cpp 自动 offload
-    generate_kwargs={"repeat_penalty": 1.1},  # 抑制循环式复读
-    verbose=False,
-)
+
+
+def _init_settings():
+    """
+    加载 Embedding 与本地 LLM，写入 LlamaIndex 全局 Settings。
+
+    这两个模型都较重（Embedding 首次要下载约 100MB，LLM 要读 GGUF），
+    所以放在 main() 里按需初始化，而不是在模块顶层赋值——
+    否则任何 import 本模块的动作（测试收集、工具扫描）都会付出加载代价。
+    与 rag_retrieval_lab.py 的做法保持一致。
+    """
+    # 本地中文向量模型：句子级语义 Embedding，CPU 可跑，无需 API Key
+    # 与原版的 all-MiniLM 相比，bge-small-zh 对中文知识库检索效果更好
+    Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-zh-v1.5")
+
+    # 本地 LLM：llama.cpp 加载 Qwen2.5-1.5B-Instruct GGUF
+    Settings.llm = LlamaCPP(
+        model_path=MODEL_PATH,
+        temperature=0.3,        # 降到 0.3 抑制小模型的发散与循环
+        max_new_tokens=512,     # 答案长度上限，避免无限生成
+        context_window=4096,    # 4K 上下文足够装下检索片段+问题+答案
+        model_kwargs={"n_gpu_layers": 0},  # 纯 CPU；有 GPU 可调大让 llama.cpp 自动 offload
+        generate_kwargs={"repeat_penalty": 1.1},  # 抑制循环式复读
+        verbose=False,
+    )
 
 
 def _qwen_chat_prompt(system: str, user: str) -> str:
@@ -221,6 +232,9 @@ def main():
     print("=" * 60)
     print("🤖 RAG Demo - LlamaIndex + bge-small-zh + Qwen2.5 (llama.cpp)")
     print("=" * 60)
+
+    # 步骤0: 初始化 Embedding 与本地 LLM（较重，按需加载）
+    _init_settings()
 
     # 步骤1: 加载或构建索引（幂等，已有索引直接读盘不重复向量化）
     index = init_index()

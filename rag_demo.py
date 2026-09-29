@@ -88,11 +88,20 @@ def init_vectordb():
     ef = embedding_functions.DefaultEmbeddingFunction()
 
     # get_or_create: 首次创建，后续复用，保证可重复运行不报错
+    # hnsw:space 必须显式声明：Chroma 默认是 L2（欧氏距离）而非余弦。
+    # 实测不声明时 distances 为 L2 距离，下游 1-dist 会算出负数相似度。
+    space = "cosine"
     collection = client.get_or_create_collection(
         name="agent_knowledge",
         embedding_function=ef,
-        metadata={"description": "AI Agent开发知识库"}
+        metadata={"description": "AI Agent开发知识库", "hnsw:space": space}
     )
+
+    # 集合已存在时 Chroma 不会就地改配置，旧的 L2 集合会被静默沿用
+    if collection.metadata.get("hnsw:space") != space:
+        print(f"⚠️  已有集合的距离空间是 "
+              f"{collection.metadata.get('hnsw:space', 'l2')}，与本次声明的 {space} 不一致。"
+              f"Chroma 不支持修改已有集合，请删除 {db_path} 后重新运行")
     return collection
 
 
@@ -129,7 +138,7 @@ def search_knowledge(collection, query: str, n_results: int = 3):
     Returns:
         Chroma query 结果字典，常用键：
           documents - 嵌套列表，外层按 query 顺序，内层是该 query 的命中文档
-          distances - 对应的余弦距离（越小越相似）
+          distances - 对应的距离（越小越相似；语义由集合的 hnsw:space 决定）
           metadatas - 对应的元数据
     """
     results = collection.query(
@@ -163,7 +172,8 @@ def simple_rag(collection, question: str):
 
     print("📖 检索到的相关知识：\n")
     for i, (doc, dist, meta) in enumerate(zip(docs, distances, metadatas), 1):
-        # Chroma 返回余弦距离（0=完全相同，2=完全相反），1-dist 转成相似度百分比
+        # 集合声明 hnsw:space=cosine，distances 是余弦距离（即 1 - 余弦相似度），
+        # 故 1 - dist 还原成余弦相似度。若沿用旧的 L2 集合，这里会打出负值
         similarity = 1 - dist
         print(f"  [{i}] 相似度: {similarity:.2%} | 主题: {meta['topic']}")
         print(f"      {doc[:80]}...")

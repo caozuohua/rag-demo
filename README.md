@@ -58,9 +58,9 @@ llama.cpp 加载 Qwen2.5-1.5B-Instruct GGUF (1GB, CPU) 生成回答
 
 ```bash
 uv sync
-# llama-cpp-python 装预编译 wheel，避免 Windows 本地编译（为什么见"踩坑经验"）
-uv pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-uv pip install llama-index-llms-llama-cpp
+# 这条命令会装齐所有依赖，含 llama-cpp-python 的预编译 wheel。
+# 它在 PyPI 只有源码包（Windows 直装会触发本地 C++ 编译），
+# pyproject.toml 已把官方 wheel 源绑定到该包，原理见踩坑 7。
 ```
 
 ### 2. 下载 LLM 模型（约 1GB）
@@ -153,6 +153,7 @@ uv run python rag_retrieval_lab.py      # 自动检测并加载 evalset.json
 | `HF_ENDPOINT` | 无 | 国内网络设为 `https://hf-mirror.com` 加速 HuggingFace 下载 |
 | `ZHIPUAI_API_KEY` | 无 | 智谱开放平台 API key，仅 gen_evalset.py 出题时需要 |
 | `GLM_MODEL` | `glm-4.5-air` | 出题模型 id，以智谱开放平台实际可用名为准 |
+| `GLM_MAX_TOKENS` | `8192` | 出题模型输出上限，须为整数；GLM-4.5-Air 是推理模型，thinking token 会吃掉输出预算，给少了会因 `finish_reason=length` 报错 |
 | `HF_HUB_OFFLINE` | 无 | 设为 `1` 跳过 HF 联网检查，模型已缓存时离线秒启动 |
 
 ## 踩坑经验
@@ -190,23 +191,44 @@ LlamaCPP 集成层不做参数名映射，直接透传给 llama-cpp-python。
 
 不同 Embedding 模型的向量空间互不兼容。换模型后继续用旧索引会导致检索结果错乱（且不报错，更隐蔽）。删除 `data/llamaindex_store/` 重新构建即可。
 
+同类陷阱：**collection 的距离空间（`hnsw:space`）一旦创建就不能改**。Chroma 默认是 L2（欧氏距离）而不是余弦；本项目曾漏设该参数，却按"余弦距离"去换算，`1 - dist` 打出了 `相似度: -8.13%` 这种负值（检索本身没坏，是显示与注释错了）。现在 `rag_demo.py` 显式声明 `hnsw:space=cosine`，并在检测到沿用旧集合时给出提示——删除 `data/chroma_db` 重建即可。
+
 ### 5. Windows 装 llama-cpp-python 用预编译 wheel
 
-直接 `pip install llama-cpp-python` 在 Windows 上会触发本地 C++ 编译，极易失败。官方提供了各平台预编译 wheel：
+直接 `pip install llama-cpp-python` 在 Windows 上会触发本地 C++ 编译，极易失败。官方提供了各平台预编译 wheel，本项目**已在 `pyproject.toml` 里声明专属 wheel 源**（写法见踩坑 7），`uv sync` 会自动取到，无需手工操作。
+
+临时手工安装（不推荐：不属于依赖声明，下次 `uv sync` 会被清掉）：
 
 ```bash
 uv pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 ```
 
-GPU 版把 `cpu` 换成 `cu121` 等（需与本机 CUDA 版本匹配）。
+GPU 版把 URL 里的 `cpu` 换成 `cu121` 等（需与本机 CUDA 版本匹配）。
 
 ### 6. LlamaIndex 必须显式设置 `Settings.llm`
 
 LlamaIndex 默认 LLM 是 OpenAI，不设置就在构建索引/查询时尝试联网调用 OpenAI API。纯本地场景要么置 `Settings.llm = None`（纯检索），要么设为 `LlamaCPP(...)`。
 
-### 7. `uv pip install` 与 `uv add` 不要混用
+### 7. 依赖必须写进 `pyproject.toml`，`uv pip install` 装的不算数
 
-`uv pip install` 不写入 `pyproject.toml`/`uv.lock`，之后执行 `uv sync` 会把未锁定的包**从环境中删掉**。本项目现状：`llama-cpp-python` 因需要额外 wheel 源，用 `uv pip` 安装；每次 `uv sync` 后需重跑上面第 1 步的两条 `uv pip install` 命令。
+`uv pip install` 不写入 `pyproject.toml`/`uv.lock`，之后执行 `uv sync` 会把它装的包**从环境中删掉**。本项目真实踩到过：`llama-index-llms-llama-cpp` 曾靠 `uv pip install` 安装，一次 `uv sync` 后就变成 `ModuleNotFoundError: No module named 'llama_index.llms'`。
+
+正确做法是把依赖声明在 `pyproject.toml` 里。`llama-cpp-python` 的特殊之处是 PyPI 只有源码包，Windows 直装会触发本地 C++ 编译且极易失败；官方提供各平台预编译 wheel，用 uv 的"专属源"声明即可让 `uv sync` 自动取到 wheel，不必手工安装：
+
+```toml
+[[tool.uv.index]]
+name = "llama-cpp-cpu"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+explicit = true          # 只服务显式绑定的包，不影响其它依赖取源
+
+[tool.uv.sources]
+llama-cpp-python = { index = "llama-cpp-cpu" }
+```
+
+两个配套细节：
+
+- 该源对 `cp313-win_amd64` 目前只出到 `0.3.19`，所以 `pyproject.toml` 给 `llama-cpp-python` 加了 `<0.3.20` 上限。**没有上限时 uv 会挑到更高版本，但那只在 PyPI 有源码包，又会回到本地编译**——这个坑我们实际撞了一次才发现。
+- `uv.lock` 必须提交（已从 `.gitignore` 移除），否则 clone 后解析出的版本组合不可复现，见踩坑 11。
 
 ### 8. 国内网络：HuggingFace 下载加镜像
 
@@ -296,6 +318,7 @@ rag-demo/
 ├── gen_evalset.py            # 评测集生成: RAGAS + GLM 云端出题 → evalset.json
 ├── download_model.py         # GGUF 模型下载脚本
 ├── pyproject.toml            # 项目元数据与依赖（uv 管理）
+├── uv.lock                   # 锁定依赖版本（必须提交，保证 clone 后可复现）
 ├── .gitignore
 ├── data/                     # 向量库持久化（git 忽略，运行时生成）
 └── models/                   # GGUF 模型文件（git 忽略）

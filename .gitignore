@@ -3,7 +3,8 @@ __pycache__/
 *.pyc
 data/
 models/
-uv.lock
+# uv.lock 必须提交：ragas 0.4.3 对 langchain 版本敏感（见 README 踩坑 11），
+# 不锁文件则 clone 后 uv sync 可能解析出不兼容组合
 .trae/
 .env
 # vim/编辑器备份与交换文件（可能残留 .env 里的密钥，务必排除）

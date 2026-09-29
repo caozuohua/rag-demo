@@ -27,8 +27,10 @@ RAG 检索优化实验 - reranker + BM25 混合检索
 """
 
 import hashlib
+import json
 import os
 import shutil
+from pathlib import Path
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
@@ -52,6 +54,9 @@ Settings.llm = None
 
 # 独立索引目录，与 demo 的 llamaindex_store 完全隔离
 PERSIST_DIR = os.getenv("LLAMAINDEX_LAB_PATH", "./data/llamaindex_lab_store")
+
+# 评测集文件：由 gen_evalset.py 产出。锚定项目根，不依赖运行时 CWD
+EVALSET_PATH = Path(__file__).resolve().parent / "evalset.json"
 
 # BM25 中文分词方案（实测结论，见 README 踩坑 9）：
 # 默认 pattern 会把整句中文切成单 token，导致中文查询 BM25 得分全为 0。
@@ -262,23 +267,29 @@ def build_configs(index):
     }
 
 
-def load_eval_set(path: str = "evalset.json"):
+def load_eval_set(path: Path | str = EVALSET_PATH):
     """
     加载评测集：优先读 gen_evalset.py 产出的 evalset.json，否则回退内置 EVAL_SET。
+
+    路径默认锚定项目根（不依赖运行时 CWD）。文件缺失或内容损坏都静默回退内置
+    EVAL_SET，避免评测因为一个坏掉的中间产物直接崩掉。
 
     evalset.json 格式：[{"query": "...", "expected": ["doc_id", ...]}, ...]
     这样自动生成的评测集无需改代码即可替换手写样本；文件不存在时行为不变。
     """
-    if os.path.exists(path):
-        import json
-
+    path = Path(path)
+    if not path.exists():
+        print(f"📥 未找到 {path}，使用内置 EVAL_SET：{len(EVAL_SET)} 条")
+        return EVAL_SET
+    try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         eval_set = [(item["query"], item["expected"]) for item in data]
-        print(f"📥 加载评测集 {path}：{len(eval_set)} 条")
-        return eval_set
-    print(f"📥 未找到 {path}，使用内置 EVAL_SET：{len(EVAL_SET)} 条")
-    return EVAL_SET
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        print(f"⚠️  {path} 解析失败（{exc}），回退内置 EVAL_SET：{len(EVAL_SET)} 条")
+        return EVAL_SET
+    print(f"📥 加载评测集 {path}：{len(eval_set)} 条")
+    return eval_set
 
 
 def evaluate(name: str, retrieve_fn, eval_set) -> dict:
@@ -377,10 +388,12 @@ def main():
     neg_queries = [q for q, e in eval_set if not e]
     if neg_queries:
         print("\n" + "=" * 78)
-        print(f"🚫 负样本表现（{neg_queries} 无答案，看各配置误命中什么）")
+        print(f"🚫 负样本表现（{len(neg_queries)} 条无答案查询，看各配置误命中什么）")
         print("=" * 78)
-        for res in results:
-            print(f"   {res['name']:<18} {res['neg_hits'][0]}")
+        for qi, q in enumerate(neg_queries):
+            print(f"\n🔍 {q}")
+            for res in results:
+                print(f"   {res['name']:<18} {res['neg_hits'][qi]}")
 
 
 if __name__ == "__main__":
