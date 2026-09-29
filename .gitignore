@@ -5,3 +5,8 @@ data/
 models/
 uv.lock
 .trae/
+.env
+# vim/编辑器备份与交换文件（可能残留 .env 里的密钥，务必排除）
+*~
+*.un~
+*.swp

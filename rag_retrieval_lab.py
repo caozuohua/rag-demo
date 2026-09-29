@@ -46,7 +46,8 @@ from llama_index.retrievers.bm25 import BM25Retriever
 
 # 纯检索实验，显式禁用 LLM：QueryFusionRetriever 在 num_queries=1 时
 # 不会调用 LLM，但仍会 resolve 一个 Settings.llm 占位（MockLLM，零成本）
-Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-zh-v1.5")
+# 注意：embed_model 较重（需加载 bge 模型），放到 main() 里才设置，
+# 保证本模块可被 gen_evalset.py 轻量 import（只取 CORPUS/EVAL_SET）
 Settings.llm = None
 
 # 独立索引目录，与 demo 的 llamaindex_store 完全隔离
@@ -261,7 +262,26 @@ def build_configs(index):
     }
 
 
-def evaluate(name: str, retrieve_fn) -> dict:
+def load_eval_set(path: str = "evalset.json"):
+    """
+    加载评测集：优先读 gen_evalset.py 产出的 evalset.json，否则回退内置 EVAL_SET。
+
+    evalset.json 格式：[{"query": "...", "expected": ["doc_id", ...]}, ...]
+    这样自动生成的评测集无需改代码即可替换手写样本；文件不存在时行为不变。
+    """
+    if os.path.exists(path):
+        import json
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        eval_set = [(item["query"], item["expected"]) for item in data]
+        print(f"📥 加载评测集 {path}：{len(eval_set)} 条")
+        return eval_set
+    print(f"📥 未找到 {path}，使用内置 EVAL_SET：{len(EVAL_SET)} 条")
+    return EVAL_SET
+
+
+def evaluate(name: str, retrieve_fn, eval_set) -> dict:
     """
     对评测集跑一个配置，返回宏平均指标与逐条明细。
 
@@ -270,7 +290,7 @@ def evaluate(name: str, retrieve_fn) -> dict:
     hits, recalls, mrrs = [], [], []
     details, neg_hits = [], []
 
-    for query, expected in EVAL_SET:
+    for query, expected in eval_set:
         nodes = retrieve_fn(query)[:TOP_K]
         got = [_doc_id(n.node) for n in nodes]
 
@@ -302,13 +322,13 @@ def evaluate(name: str, retrieve_fn) -> dict:
     }
 
 
-def print_details(results):
+def print_details(results, eval_set):
     """打印逐条命中明细，直观对比各配置把哪个文档排到了前面。"""
     print("\n" + "=" * 78)
     print("📋 逐条命中明细（列表为 Top-3 命中顺序，✅/❌ 看是否命中期望）")
     print("=" * 78)
 
-    pos = [(q, e) for q, e in EVAL_SET if e]
+    pos = [(q, e) for q, e in eval_set if e]
     for qi, (query, expected) in enumerate(pos):
         print(f"\n🔍 {query}")
         print(f"   期望命中: {expected}")
@@ -322,6 +342,9 @@ def main():
     print("🧪 RAG 检索优化实验 - reranker + BM25 混合检索（纯检索评估）")
     print("=" * 78)
 
+    # embed_model 在 main 才加载：被 gen_evalset.py import 时不必付出模型加载成本
+    Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-zh-v1.5")
+    eval_set = load_eval_set()
     index = build_index()
 
     print(f"⚙️  加载 reranker（{RERANKER_MODEL}，首次需下载约 278MB）...")
@@ -331,9 +354,9 @@ def main():
     results = []
     for name, fn in configs.items():
         print(f"⏳ 评估 {name} ...")
-        results.append(evaluate(name, fn))
+        results.append(evaluate(name, fn, eval_set))
 
-    n_pos = len([e for _, e in EVAL_SET if e])
+    n_pos = len([e for _, e in eval_set if e])
     print("\n" + "=" * 78)
     print(f"📊 检索质量对比（语料 {len(CORPUS)} 条，K={TOP_K}，候选池={CANDIDATE_K}，正样本 {n_pos} 条）")
     print("=" * 78)
@@ -349,13 +372,15 @@ def main():
         d_mrr = res["mrr@k"] - baseline["mrr@k"]
         print(f"   {res['name']} vs baseline: Hit {d_hit:+.1%}, Recall {d_rec:+.1%}, MRR {d_mrr:+.3f}")
 
-    print_details(results)
+    print_details(results, eval_set)
 
-    print("\n" + "=" * 78)
-    print("🚫 负样本表现（'今天天气怎么样' 无答案，看各配置误命中什么）")
-    print("=" * 78)
-    for res in results:
-        print(f"   {res['name']:<18} {res['neg_hits'][0]}")
+    neg_queries = [q for q, e in eval_set if not e]
+    if neg_queries:
+        print("\n" + "=" * 78)
+        print(f"🚫 负样本表现（{neg_queries} 无答案，看各配置误命中什么）")
+        print("=" * 78)
+        for res in results:
+            print(f"   {res['name']:<18} {res['neg_hits'][0]}")
 
 
 if __name__ == "__main__":

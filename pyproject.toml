@@ -8,7 +8,27 @@ dependencies = [
     "llama-index-core>=0.14.24",
     "llama-index-embeddings-huggingface>=0.8.0",
     "llama-index-retrievers-bm25>=0.8.0",
+    # 评测集生成（gen_evalset.py）：RAGAS + 智谱 GLM OpenAI 兼容接口
+    # ragas 0.4.3 导入 langchain_community.chat_models.vertexai，该模块在
+    # langchain-community 0.4.0 被移除，故 langchain-* 锁 0.3 系列（ragas 本身用 0.4.3）。
+    # 仅影响 gen_evalset，lab 与两个 demo 走 llama_index，不受影响。
+    # rapidfuzz 是 ragas OverlapScoreBuilder 的隐性依赖，不会自动安装，须显式声明。
+    "ragas>=0.4.3,<0.5",
+    "rapidfuzz>=3.0",
+    "langchain-community>=0.3.0,<0.4",
+    "langchain-openai>=0.3.0,<0.4",
+    "langchain-huggingface>=0.3.0,<0.4",
 ]
 
 [tool.uv]
 package = false
+# 多镜像源下允许跨源取最优版本（否则某源有旧版包会挡住另一源的新版）
+index-strategy = "unsafe-best-match"
+
+# 国内镜像：清华为主源，阿里云兜底（单源偶发缺新版本包时自动 fallback）
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"

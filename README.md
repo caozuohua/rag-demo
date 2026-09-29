@@ -117,6 +117,30 @@ uv run python rag_retrieval_lab.py
 
 > 诚实提示：个别"多答案"查询（如"中文Embedding模型有哪些"期望 4 篇）受 Top-3 坑位限制，Recall@3 有 75% 的结构性天花板，并非检索失败。
 
+### 自动生成评测集（RAGAS + GLM-4.5-Air）
+
+手写 `EVAL_SET` 是瓶颈：语料一扩充，人工标注 ground truth 就跟不上。`gen_evalset.py` 用 [RAGAS](https://docs.ragas.io) 从 CORPUS 自动生成问答评测集：
+
+```powershell
+# 推荐：项目根建 .env 文件（已被 .gitignore 忽略），内容一行：
+#   ZHIPUAI_API_KEY=你的key
+# 然后直接运行：
+uv run python gen_evalset.py            # 默认生成 30 题，产出 evalset.json
+uv run python rag_retrieval_lab.py      # 自动检测并加载 evalset.json
+```
+
+> ⚠️ 别用 `set ZHIPUAI_API_KEY=xxx`：在 PowerShell 里 `set` 是 `Set-Variable` 别名，只建了脚本内变量，不会成为环境变量，子进程读不到（实测踩坑，见第 12 条）。临时设置要用 `$env:ZHIPUAI_API_KEY="xxx"`，且只对当前终端会话生效。
+
+分工设计（对应"出题用强模型、跑实验用本地模型"的原则）：
+
+| 环节 | 模型 | 位置 |
+|---|---|---|
+| 出题（知识图谱抽取、问题进化） | GLM-4.5-Air（智谱 API） | 云端，一次性 |
+| 问题去重/聚类 | bge-small-zh | 本地，复用已有 |
+| 日常检索实验 | 无 LLM（纯检索） | 全本地 |
+
+生成结果固化成 `evalset.json` 后，日常实验不再碰 API。`reference_contexts` 通过原文子串匹配映射回 `doc_id`，映射失败的条目直接丢弃，保证每条 ground truth 可信。负样本（知识库无答案的问题）RAGAS 不产，继续手工维护在 `NEGATIVE_QUERIES`。
+
 ## 配置项（环境变量）
 
 | 变量 | 默认值 | 说明 |
@@ -127,6 +151,9 @@ uv run python rag_retrieval_lab.py
 | `MODEL_PATH` | `./models/qwen2.5-1.5b-instruct-q4_k_m.gguf` | GGUF 模型路径 |
 | `MODEL_DIR` | `./models` | download_model.py 的下载目录 |
 | `HF_ENDPOINT` | 无 | 国内网络设为 `https://hf-mirror.com` 加速 HuggingFace 下载 |
+| `ZHIPUAI_API_KEY` | 无 | 智谱开放平台 API key，仅 gen_evalset.py 出题时需要 |
+| `GLM_MODEL` | `glm-4.5-air` | 出题模型 id，以智谱开放平台实际可用名为准 |
+| `HF_HUB_OFFLINE` | 无 | 设为 `1` 跳过 HF 联网检查，模型已缓存时离线秒启动 |
 
 ## 踩坑经验
 
@@ -211,6 +238,43 @@ BM25Retriever.from_defaults(
 
 处理：分数只用于**排序**；需要展示"置信度"时套一层 sigmoid 归一化。它与向量检索的余弦相似度不可直接比较。
 
+### 11. ragas 0.4.3 必须配 langchain 0.3.x，装最新会 ImportError
+
+`import ragas` 时报 `No module named 'langchain_community.chat_models.vertexai'`——ragas 0.4.3 裸依赖 `langchain-community`（无上限），uv 拉了 0.4.2，而该模块在 0.4.0 被移除。
+
+```toml
+# ✅ 锁 0.3.x 组合
+"ragas>=0.4.3,<0.5"
+"langchain-community>=0.3.0,<0.4"
+"langchain-openai>=0.3.0,<0.4"
+"langchain-huggingface>=0.3.0,<0.4"
+```
+
+0.3.x 依赖 `langchain-core<1.0`，所以 langchain-openai/huggingface 也要同步降到 0.3 系列，不能只降 community。这套只服务 `gen_evalset.py`，lab 和两个 demo 走 llama_index，不受牵连。
+
+### 12. PowerShell 里 `set KEY=value` 不会设置环境变量
+
+`set` 在 cmd 里是设环境变量，但在 PowerShell 里是 `Set-Variable` 的别名——只创建脚本内变量，**不会传给子进程**。表现为明明执行了 `set ZHIPUAI_API_KEY=xxx`，python 里 `os.getenv` 依然拿到 None。
+
+```powershell
+set ZHIPUAI_API_KEY=xxx              # ❌ cmd 语法，PowerShell 下无效
+$env:ZHIPUAI_API_KEY = "xxx"         # ✅ 当前会话生效
+# ✅✅ 推荐：项目根 .env 文件（gitignore 已排除），gen_evalset.py 自动加载
+```
+
+### 13. LlamaIndex 与 langchain 的模型缓存目录不同，离线模式直接崩
+
+`gen_evalset.py` 启动后先卡在反复 `WinError 10060` 重试（1s→2s→4s→8s→8s），加 `HF_HUB_OFFLINE=1` 后又变成 `LocalEntryNotFoundError` 直接报错。两个现象同一根因：**模型缓存位置不一致**——
+
+- LlamaIndex 的 `HuggingFaceEmbedding` 把模型下到 `%LOCALAPPDATA%\llama_index\...\Cache`
+- langchain 的 `HuggingFaceEmbeddings` 只查标准 HF 缓存（`HF_HOME` 或 `~/.cache/huggingface`）
+
+模型其实早已缓存，但 langchain 在标准位置找不到：联网时它去 hub 重下（表现为 retry 卡顿），离线时直接报错。
+
+解法：`gen_evalset.py` 里的 `resolve_local_model()` 搜遍两处缓存，命中就把 snapshot 本地路径直接传给 embedding，绕开 hub 名称查找。`HF_HUB_OFFLINE=1` 可继续保留（跳过联网检查，秒启动）。
+
+> 附带一个日志误导点：`LLM is explicitly disabled. Using MockLLM.` 是 `import rag_retrieval_lab` 时其模块级 `Settings.llm = None` 打的，属检索实验专用；出题的 GLM 在 `generate()` 里单独创建，两者无关。看到这条不代表云端模型没生效。
+
 ## 常见问题
 
 **Q：检索相似度只有 60-70%，是不是太低？**
@@ -229,6 +293,7 @@ rag-demo/
 ├── rag_demo.py               # Demo 1: Chroma 纯检索
 ├── rag_demo_llamaindex.py    # Demo 2: LlamaIndex 端到端 RAG
 ├── rag_retrieval_lab.py      # 实验: 检索优化对比（reranker + BM25）
+├── gen_evalset.py            # 评测集生成: RAGAS + GLM 云端出题 → evalset.json
 ├── download_model.py         # GGUF 模型下载脚本
 ├── pyproject.toml            # 项目元数据与依赖（uv 管理）
 ├── .gitignore
