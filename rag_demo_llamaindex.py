@@ -129,8 +129,13 @@ KNOWLEDGE_BASE = [
     },
     {
         "id": "doc8",
-        "text": "Qwen2.5-0.5B是阿里云开源的轻量级模型，约1GB大小，支持本地运行，中文优化好。通过Ollama可以一键部署，适合本地写作辅助等场景。",
+        "text": "本地可运行的轻量模型：Qwen2.5系列有0.5B、1.5B等小规格，中文优化好，约1GB起；bge-small-zh是约100MB的中文向量模型，CPU可跑。用llama.cpp加载GGUF量化格式即可在无GPU的机器上推理，Q4_K_M档在体积与质量间较均衡。",
         "metadata": {"topic": "本地模型", "type": "工具"}
+    },
+    {
+        "id": "doc9",
+        "text": "Agent记忆分两类：短期记忆是上下文窗口内的对话历史，会随会话增长溢出，可截断或摘要压缩；长期记忆把重要信息向量化后存入外部存储（向量库或数据库），跨会话检索召回。注意LangGraph的State只在单次工作流内共享，属于短期记忆，不是跨会话的长期记忆。",
+        "metadata": {"topic": "Agent记忆", "type": "技术"}
     },
 ]
 
@@ -164,14 +169,25 @@ def init_index():
     return index
 
 
+# 检索结果的"分数断层"过滤比例：只保留相似度 >= 最高分 * 该比例的节点。
+# 用相对比例而非绝对阈值：绝对阈值与 Embedding 模型和语料强相关，实测同一批
+# 查询的正解分在 44%~72% 之间浮动，设固定值必然误杀；"与最佳命中差多少"更稳。
+# 取值依据（见 README 踩坑 14）：正解的 top1->top2 比值约 0.94，噪声比值 0.76~0.81。
+SCORE_GAP_RATIO = 0.85
+
+
 def search_knowledge(index, query: str, top_k: int = 3):
     """
-    语义检索：query 向量化后取最相似的 top_k 个节点。
+    语义检索：query 向量化后取最相似的 top_k 个节点，再按分数断层过滤。
+
+    为什么要过滤：1.5B 模型会把"话题相近但不是答案"的片段也当依据，实测出现
+    把 CrewAI 的 role/goal/backstory 说成"长期记忆"这类编造，而用 prompt 约束
+    收效有限（prompt 已试两版）。改在检索侧挡掉噪声，比教模型"忽略噪声"可靠。
 
     Args:
         index: 已加载/构建好的 VectorStoreIndex
         query: 用户问题文本
-        top_k: 返回节点数量
+        top_k: 返回节点数量上限
 
     Returns:
         NodeWithScore 列表，每个元素包含：
@@ -180,7 +196,13 @@ def search_knowledge(index, query: str, top_k: int = 3):
           node.score             - 余弦相似度，越大越相似（与 Chroma 的距离相反）
     """
     retriever = index.as_retriever(similarity_top_k=top_k)
-    return retriever.retrieve(query)
+    nodes = retriever.retrieve(query)
+    if not nodes:
+        return nodes
+
+    # 检索结果按相似度降序返回，故 [0] 即最佳命中
+    cutoff = (nodes[0].score or 0.0) * SCORE_GAP_RATIO
+    return [n for n in nodes if (n.score or 0.0) >= cutoff]
 
 
 def simple_rag(index, question: str):
@@ -210,15 +232,26 @@ def simple_rag(index, question: str):
 
     # 把命中文档拼成 LLM 的上下文，约束 LLM 只用检索内容作答
     context = "\n".join([f"- {doc}" for doc in docs])
+
+    # 兜底约束：原先只在 system 里写"无关就直说"，1.5B 仍然编造（把 LangGraph
+    # 的 State 当成跨会话长期记忆）。
+    # 注意：第一版判据写成"话题相近但不含答案就拒答"，结果过度触发——知识库里
+    # 明明有答案（问"如何添加"，文档讲"分两类"），模型也判成"话题相近"而拒答。
+    # 所以判据必须收紧到"完全不同的主题"，并显式允许归纳原文。
     system_msg = (
-        "你是一个知识助手，只依据下面给出的检索知识回答问题，"
-        "不要编造检索以外的内容。如果检索知识与问题无关，"
-        "直接说「知识库中没有相关信息」。"
+        "你是一个知识助手。你只能使用「检索到的知识」中出现的句子作答，"
+        "禁止引入检索内容之外的事实。"
     )
     user_msg = (
         f"检索到的知识：\n{context}\n\n"
         f"问题：{question}\n\n"
-        "请用中文简洁回答。"
+        "回答规则（按顺序判断）：\n"
+        "1. 只要检索到的知识里包含与问题相关的信息，就用它作答；"
+        "可以对原文做归纳，不必逐字照抄；\n"
+        "2. 只有当检索到的知识讲的是完全不同的主题、与问题毫无关系时，"
+        "才回复「知识库中没有相关信息」；\n"
+        "3. 只使用检索到的知识作答，不要把一篇文档的内容安到另一个主体上，"
+        "也不要罗列与问题无关的片段。"
     )
     prompt = _qwen_chat_prompt(system_msg, user_msg)
 
