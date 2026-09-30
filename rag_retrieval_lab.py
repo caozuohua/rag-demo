@@ -26,10 +26,12 @@ RAG 检索优化实验 - reranker + BM25 混合检索
 
 运行：
   set HF_ENDPOINT=https://hf-mirror.com
-  uv run python rag_retrieval_lab.py
+  uv run python rag_retrieval_lab.py            # 四配置对比
+  uv run python rag_retrieval_lab.py --sweep    # 附加：阈值敏感性实验（标定 SCORE_GAP_RATIO）
 首次运行会下载 bge-reranker-base（约 278MB）并向量化语料。
 """
 
+import argparse
 import hashlib
 import json
 import os
@@ -72,6 +74,14 @@ RERANKER_MODEL = "BAAI/bge-reranker-base"
 
 TOP_K = 3        # 最终评估的坑位数
 CANDIDATE_K = 10 # 交给重排/融合的候选池大小（远小于语料总数，才有区分度）
+
+# 阈值敏感性实验（--sweep）的扫描网格：
+# 相对比例 = Demo 2 的 SCORE_GAP_RATIO 思路（保留 score >= ratio * top1），
+#            当时只在 4 条样本上标定，这里放到全套评测集上验证；
+# 绝对门槛 = top1 分数低于 floor 时整题拒答（相对比例对负样本无效，
+#            负样本的分数同样抱团，只有绝对门槛才可能拒掉库外问题）。
+RELATIVE_RATIOS = [0.0, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
+ABSOLUTE_FLOORS = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
 
 # ============================================================
 # 语料库（约 56 条，覆盖 10 个主题簇，故意制造跨簇/簇内硬负例）
@@ -442,7 +452,104 @@ def print_details(results, eval_set):
             print(f"   {'✅' if hit else '❌'} {res['name']:<18} {got}")
 
 
-def main():
+def run_threshold_sweep(index, eval_set):
+    """
+    阈值敏感性实验：把 Demo 2 的 SCORE_GAP_RATIO 启发式放到整套评测集上标定。
+
+    两个维度分开测（作用对象都是向量余弦相似度；reranker 输出是 logits，
+    量纲不同，比例阈值对它不成立，故只作用于纯向量检索）：
+      1. 相对比例：保留 score >= ratio * top1。过滤只减不增，且 top1 定义了
+         ratio 必然保留自己，所以 Hit@3 只在"top1 非期望、期望文档排 2~3 位
+         被过滤"时才掉——真正敏感的指标是 Recall 和负样本误命中。
+      2. 绝对门槛：top1 < floor 时整题拒答。相对比例对负样本无效（负样本的
+         分数同样抱团、比例接近 1），只有绝对门槛才可能拒掉库外问题，
+         代价是可能误拒正样本。
+
+    检索结果只算一次并缓存，逐阈值复用，扫描本身近乎零成本。
+    """
+    retriever = index.as_retriever(similarity_top_k=TOP_K)
+    cached = []
+    print("⏳ 阈值实验：构建检索缓存（每个查询只检索一次）...")
+    for query, expected, qtype in eval_set:
+        nodes = retriever.retrieve(query)
+        cached.append(
+            (query, expected, qtype, [(_doc_id(n.node), n.score or 0.0) for n in nodes])
+        )
+
+    def _metrics(got, expected):
+        matched = set(got) & set(expected)
+        hit = 1.0 if matched else 0.0
+        rr = 0.0
+        for rank, d in enumerate(got, 1):
+            if d in expected:
+                rr = 1.0 / rank
+                break
+        return hit, len(matched) / len(expected), rr
+
+    # ---- 维度 1：相对比例（Demo 2 的 SCORE_GAP_RATIO） ----
+    print("\n" + "=" * 78)
+    print("📐 相对阈值扫描：保留 score >= ratio * top1（ratio=0.00 即未过滤的 baseline A）")
+    print("=" * 78)
+    print(f"{'ratio':>6}{'Hit@3':>9}{'Recall@3':>11}{'MRR@3':>9}{'multi-doc':>11}{'负误命中':>10}")
+    print("-" * 78)
+    for ratio in RELATIVE_RATIOS:
+        hits, recs, mrrs, multi_recs = [], [], [], []
+        neg_pairs = 0
+        for query, expected, qtype, results in cached:
+            top1 = results[0][1] if results else 0.0
+            got = [d for d, s in results if s >= ratio * top1]
+            if not expected:
+                neg_pairs += len(got)
+                continue
+            h, r, m = _metrics(got, expected)
+            hits.append(h)
+            recs.append(r)
+            mrrs.append(m)
+            if qtype == "multi-doc":
+                multi_recs.append(r)
+        n = len(hits)
+        multi = sum(multi_recs) / len(multi_recs) if multi_recs else 0.0
+        print(f"{ratio:>6.2f}{sum(hits)/n:>9.1%}{sum(recs)/n:>11.1%}"
+              f"{sum(mrrs)/n:>9.3f}{multi:>11.1%}{neg_pairs:>8}/9")
+
+    # ---- 维度 2：绝对门槛（top1 < floor 整题拒答） ----
+    print("\n" + "=" * 78)
+    print("📐 绝对门槛扫描：top1 低于 floor 时整题拒答（考察能否挡住库外问题）")
+    print("=" * 78)
+    print(f"{'floor':>6}{'Hit@3':>9}{'Recall@3':>11}{'MRR@3':>9}{'误拒正样本':>12}{'负拒答':>9}{'负误命中':>10}")
+    print("-" * 78)
+    for floor in ABSOLUTE_FLOORS:
+        hits, recs, mrrs = [], [], []
+        false_reject, neg_rejected, neg_pairs = 0, 0, 0
+        for query, expected, qtype, results in cached:
+            top1 = results[0][1] if results else 0.0
+            got = [d for d, _ in results] if top1 >= floor else []
+            if not expected:
+                neg_rejected += 1 if not got else 0
+                neg_pairs += len(got)
+                continue
+            false_reject += 1 if not got else 0
+            h, r, m = _metrics(got, expected)
+            hits.append(h)
+            recs.append(r)
+            mrrs.append(m)
+        n = len(hits)
+        print(f"{floor:>6.2f}{sum(hits)/n:>9.1%}{sum(recs)/n:>11.1%}{sum(mrrs)/n:>9.3f}"
+              f"{false_reject:>9}/{n}{neg_rejected:>7}/3{neg_pairs:>8}/9")
+
+    # ---- 分离度分析：绝对门槛是否存在完美分离点 ----
+    pos_top1 = [rs[0][1] for _, e, _, rs in cached if e and rs]
+    neg_top1 = [rs[0][1] for _, e, _, rs in cached if not e and rs]
+    print("\nℹ️  top1 分数分布：正样本 [{:.3f}, {:.3f}]，负样本 [{:.3f}, {:.3f}]".format(
+        min(pos_top1), max(pos_top1), min(neg_top1), max(neg_top1)))
+    if min(pos_top1) > max(neg_top1):
+        print("   ✅ 存在完美分离门槛：floor ∈ ({:.3f}, {:.3f}) 可零误拒、全拒负样本".format(
+            max(neg_top1), min(pos_top1)))
+    else:
+        print("   ❌ 正负样本 top1 区间重叠，不存在零代价的分离门槛，只能权衡误拒/误命中")
+
+
+def main(sweep: bool = False):
     print("=" * 78)
     print("🧪 RAG 检索优化实验 - reranker + BM25 混合检索（纯检索评估）")
     print("=" * 78)
@@ -502,6 +609,14 @@ def main():
             for res in results:
                 print(f"   {res['name']:<18} {res['neg_hits'][qi]}")
 
+    if sweep:
+        run_threshold_sweep(index, eval_set)
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="RAG 检索优化实验")
+    parser.add_argument(
+        "--sweep", action="store_true",
+        help="四配置对比后附加运行阈值敏感性实验（标定 Demo2 的 SCORE_GAP_RATIO）",
+    )
+    main(sweep=parser.parse_args().sweep)
