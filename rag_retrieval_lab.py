@@ -20,6 +20,10 @@ RAG 检索优化实验 - reranker + BM25 混合检索
   但并非答案的文档），建到独立的索引目录，不复用也不影响 demo 的 8 条。
   候选池远大于 Top-K 后，Recall 才有下降空间，四种配置的差距才显现。
 
+评测集：内置 EVAL_SET（人工逐条校订、带 type 分类标注），是唯一可信基准；
+  evalset.json（RAGAS 自动生成）存在时会被加载，但必须通过校验闸门——
+  自动标签曾 30/30 系统性错标，见 README 踩坑 15。
+
 运行：
   set HF_ENDPOINT=https://hf-mirror.com
   uv run python rag_retrieval_lab.py
@@ -144,35 +148,61 @@ CORPUS = [
 ]
 
 # ============================================================
-# 评测集：query -> 应命中的 doc id 列表（ground truth）
-# 覆盖：单文档 / 多文档 / 含硬负例干扰 / 负样本（知识库无答案）
+# 评测集：内置、人工逐条校订，是检索质量的唯一可信基准
+#
+# 设计原则（为什么不用 RAGAS 自动生成，见 README 踩坑 15）：
+#   1. ground truth 精确到 doc_id、人工校订——自动生成的标签实测
+#      30/30 系统性错标，评测集宁可少而准
+#   2. 每条带 type 标注，每类查询压测一种检索机制：
+#        keyword      精确术语（PagedAttention/Q4_K_M/HNSW/RRF）—— BM25 应占优
+#        paraphrase   语义改写（与答案几乎无词面重叠）—— 向量应占优
+#        interference 词面干扰（同簇/跨簇硬负例密集）—— reranker 应占优
+#        multi-doc    跨文档聚合对比 —— 考察 Top-K 覆盖
+#        factual      单文档事实题 —— 基础盘
+#        negative     负样本（库外无答案）—— 考察误命中
+#   3. expected 数量 <= TOP_K：否则 Recall@3 被结构性封顶
+#      （期望 4 篇时最高只能 0.75，指标失真而非检索差）
+#   4. 复现零 API 依赖：clone -> uv sync -> uv run 本脚本
 # ============================================================
 
 EVAL_SET = [
-    ("LangGraph和CrewAI有什么区别", ["d_langgraph", "d_crewai"]),
-    ("如何给Agent添加长期记忆", ["d_longmem"]),
-    ("AutoGen是什么框架", ["d_autogen"]),
-    ("本地没有GPU怎么跑大模型", ["d_llamacpp"]),
-    ("ReAct和Plan-and-Execute哪个更灵活", ["d_react", "d_planexecute"]),
-    ("向量数据库有哪些本地轻量的选择", ["d_chroma", "d_lancedb", "d_faiss"]),
-    ("RAG能解决什么问题", ["d_rag_flow", "d_hallucination"]),
-    ("中文Embedding模型有哪些", ["d_bge_small", "d_bge_large", "d_m3e", "d_text2vec"]),
-    ("什么是模型量化", ["d_quantization"]),
-    ("检索时语义和关键词都想兼顾怎么办", ["d_hybrid"]),
-    ("两阶段检索的第二阶段是什么", ["d_rerank"]),
-    ("长文档怎么切分成片段", ["d_chunking"]),
-    ("怎么评估检索质量", ["d_rageval"]),
-    ("LoRA和全参数微调的区别", ["d_lora", "d_fullft"]),
-    ("怎么用一张卡微调大模型", ["d_qlora"]),
-    ("对话历史太长超出上下文怎么办", ["d_summarymem", "d_shortmem"]),
-    ("让模型按固定JSON格式输出", ["d_structured"]),
-    ("vLLM靠什么技术提高吞吐", ["d_vllm"]),
-    ("Qwen2.5有哪些规格", ["d_qwen"]),
-    ("把RAG封装成HTTP接口用什么", ["d_fastapi"]),
-    ("知识图谱怎么用于Agent记忆", ["d_kgmem"]),
-    ("GraphRAG和普通RAG的区别", ["d_graphrag"]),
-    ("few-shot提示是什么", ["d_fewshot"]),
-    ("今天天气怎么样", []),  # 负样本：知识库无相关内容
+    # --- keyword：精确术语查询（考察 BM25 精确词匹配的价值） ---
+    ("PagedAttention解决了什么问题", ["d_vllm"], "keyword"),
+    ("Q4_K_M是什么量化档位", ["d_gguf"], "keyword"),
+    ("HNSW和IVF是哪类索引", ["d_milvus"], "keyword"),
+    ("RRF是怎么融合两路检索结果的", ["d_hybrid"], "keyword"),
+    # --- paraphrase：语义改写，与答案几乎无词面重叠（考察向量语义检索） ---
+    ("本地没有GPU怎么跑大模型", ["d_llamacpp"], "paraphrase"),
+    ("怎么评估检索质量", ["d_rageval"], "paraphrase"),
+    ("两阶段检索的第二阶段是什么", ["d_rerank"], "paraphrase"),
+    ("长文档怎么切分成片段", ["d_chunking"], "paraphrase"),
+    ("对话历史太长装不下怎么办", ["d_summarymem", "d_shortmem"], "paraphrase"),
+    ("怎么让模型按程序能解析的格式输出", ["d_structured"], "paraphrase"),
+    ("希望Agent记住用户偏好、跨会话仍能想起，该怎么做", ["d_longmem"], "paraphrase"),
+    # --- interference：词面干扰，同簇/跨簇硬负例密集（考察 reranker 排序纠偏） ---
+    ("量化一定损失精度吗", ["d_quantization"], "interference"),
+    ("KV缓存为什么会占大量显存", ["d_kvcache"], "interference"),
+    ("AutoGen和Semantic Kernel分别是谁推出的", ["d_autogen", "d_semantickernel"], "interference"),
+    ("bge-small-zh和m3e哪个更适合中文短文本", ["d_bge_small", "d_m3e"], "interference"),
+    # --- multi-doc：跨文档聚合对比（考察 Top-K 覆盖能力） ---
+    ("LangGraph和CrewAI有什么区别", ["d_langgraph", "d_crewai"], "multi-doc"),
+    ("ReAct和Plan-and-Execute哪个更灵活", ["d_react", "d_planexecute"], "multi-doc"),
+    ("LoRA和全参数微调的区别", ["d_lora", "d_fullft"], "multi-doc"),
+    ("RAG能解决大模型的哪些问题", ["d_rag_flow", "d_hallucination"], "multi-doc"),
+    # --- factual：单文档事实题（基础盘） ---
+    ("AutoGen是什么框架", ["d_autogen"], "factual"),
+    ("Qwen2.5有哪些规格", ["d_qwen"], "factual"),
+    ("把RAG服务封装成HTTP接口用什么", ["d_fastapi"], "factual"),
+    ("GraphRAG和普通RAG的区别", ["d_graphrag"], "factual"),
+    ("怎么用一张消费级显卡微调大模型", ["d_qlora"], "factual"),
+    ("few-shot提示是什么", ["d_fewshot"], "factual"),
+    ("vLLM靠什么技术提高吞吐", ["d_vllm"], "factual"),
+    ("智源开源的中文Embedding模型有哪些", ["d_bge_small", "d_bge_large"], "factual"),
+    ("E5模型使用时要注意什么", ["d_e5"], "factual"),
+    # --- negative：负样本，知识库无答案（考察各配置会不会误命中） ---
+    ("今天天气怎么样", [], "negative"),
+    ("推荐一部最近上映的电影", [], "negative"),
+    ("红烧肉怎么做好吃", [], "negative"),
 ]
 
 
@@ -267,41 +297,98 @@ def build_configs(index):
     }
 
 
+def validate_eval_set(eval_set, source: str) -> list:
+    """
+    评测集自校验闸门：拦截会静默污染指标的三类坏数据，返回清洗后的评测集。
+
+    规则全部源自实际事故（README 踩坑 15）：
+      - expected 引用不存在的 doc_id -> 该条指标必然全错（RAGAS 错标事故，
+        30/30 静默生效，就是因为加载时没有这道闸）
+      - expected 数量 > TOP_K -> Recall@k 被结构性封顶，指标失真
+      - 空 query -> 解析性问题
+    内置评测集同样过闸（防手改笔误），外部 evalset.json 更不可信，必须严检。
+    """
+    valid_ids = {doc_id for doc_id, _, _ in CORPUS}
+    cleaned, bad = [], []
+    for query, expected, qtype in eval_set:
+        problems = []
+        if not query or not str(query).strip():
+            problems.append("query 为空")
+        unknown = [e for e in expected if e not in valid_ids]
+        if unknown:
+            problems.append(f"未知 doc_id: {unknown}")
+        if len(expected) > TOP_K:
+            problems.append(f"expected {len(expected)} 条 > TOP_K={TOP_K}，Recall 被结构性封顶")
+        if problems:
+            bad.append((query, problems))
+            continue
+        cleaned.append((str(query), list(expected), qtype))
+    if bad:
+        print(f"🚨 {source} 有 {len(bad)} 条坏数据被剔除：")
+        for q, why in bad:
+            print(f"   - {q!r}: {'; '.join(why)}")
+    return cleaned
+
+
 def load_eval_set(path: Path | str = EVALSET_PATH):
     """
     加载评测集：优先读 gen_evalset.py 产出的 evalset.json，否则回退内置 EVAL_SET。
 
-    路径默认锚定项目根（不依赖运行时 CWD）。文件缺失或内容损坏都静默回退内置
-    EVAL_SET，避免评测因为一个坏掉的中间产物直接崩掉。
+    两条路径都过 validate_eval_set 闸门。外部文件的 ground truth 历史上出过
+    系统性错标（RAGAS 30/30），所以外部数据不是免检，而是更要严检——
+    宁可启动时红字报错，也不能让错标签静默产出假指标。
 
-    evalset.json 格式：[{"query": "...", "expected": ["doc_id", ...]}, ...]
-    这样自动生成的评测集无需改代码即可替换手写样本；文件不存在时行为不变。
+    evalset.json 格式：[{"query": "...", "expected": [...], "type": "..."}]，
+    type 缺失时回退读 synthesizer 字段，再缺失标 "unlabeled"。
     """
     path = Path(path)
     if not path.exists():
-        print(f"📥 未找到 {path}，使用内置 EVAL_SET：{len(EVAL_SET)} 条")
-        return EVAL_SET
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        eval_set = [(item["query"], item["expected"]) for item in data]
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        print(f"⚠️  {path} 解析失败（{exc}），回退内置 EVAL_SET：{len(EVAL_SET)} 条")
-        return EVAL_SET
-    print(f"📥 加载评测集 {path}：{len(eval_set)} 条")
-    return eval_set
+        eval_set, source = EVAL_SET, "内置 EVAL_SET"
+    else:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            eval_set = [
+                (
+                    item["query"],
+                    item["expected"],
+                    item.get("type") or item.get("synthesizer") or "unlabeled",
+                )
+                for item in data
+            ]
+            source = str(path)
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            print(f"⚠️  {path} 解析失败（{exc}），回退内置 EVAL_SET")
+            eval_set, source = EVAL_SET, "内置 EVAL_SET（回退）"
+
+    cleaned = validate_eval_set(eval_set, source)
+    if not cleaned:
+        raise SystemExit(f"🚨 评测集 {source} 清洗后为空，中止评测（别拿坏数据出指标）")
+    n_neg = sum(1 for _, e, _ in cleaned if not e)
+    dist = {}
+    for _, _, t in cleaned:
+        if t != "negative":
+            dist[t] = dist.get(t, 0) + 1
+    dist_str = " ".join(f"{t}:{n}" for t, n in sorted(dist.items()))
+    print(f"📥 评测集来源 {source}：{len(cleaned)} 条（正 {len(cleaned) - n_neg} / 负 {n_neg}）[{dist_str}]")
+    return cleaned
 
 
 def evaluate(name: str, retrieve_fn, eval_set) -> dict:
     """
-    对评测集跑一个配置，返回宏平均指标与逐条明细。
+    对评测集跑一个配置，返回总体指标 + 分类型指标 + 逐条明细。
 
-    负样本（expected 为空）不计入三个指标的分母，单独统计其命中情况。
+    负样本（expected 为空）不计入指标分母，单独统计命中情况。
+    分类型统计的价值：每类查询压测一种机制（见 EVAL_SET 注释），总体指标
+    打平时，分类型仍能看出 A/B/C/D 各自在哪类查询上占优、差在哪。
     """
-    hits, recalls, mrrs = [], [], []
+    def _avg(xs):
+        return sum(xs) / len(xs) if xs else None
+
+    buckets = {}  # type -> [hits, recalls, mrrs]
     details, neg_hits = [], []
 
-    for query, expected in eval_set:
+    for query, expected, qtype in eval_set:
         nodes = retrieve_fn(query)[:TOP_K]
         got = [_doc_id(n.node) for n in nodes]
 
@@ -310,24 +397,31 @@ def evaluate(name: str, retrieve_fn, eval_set) -> dict:
             continue
 
         matched = set(got) & set(expected)
-        hits.append(1.0 if matched else 0.0)
-        recalls.append(len(matched) / len(expected))
+        hit = 1.0 if matched else 0.0
+        recall = len(matched) / len(expected)
 
         rr = 0.0
         for rank, doc_id in enumerate(got, 1):
             if doc_id in expected:
                 rr = 1.0 / rank
                 break
-        mrrs.append(rr)
 
+        buckets.setdefault(qtype, [[], [], []])
+        buckets[qtype][0].append(hit)
+        buckets[qtype][1].append(recall)
+        buckets[qtype][2].append(rr)
         details.append((query, expected, got, bool(matched)))
 
-    n = len(hits)
+    all_hits = [h for b in buckets.values() for h in b[0]]
+    all_recs = [r for b in buckets.values() for r in b[1]]
+    all_mrrs = [m for b in buckets.values() for m in b[2]]
+
     return {
         "name": name,
-        "hit@k": sum(hits) / n,
-        "recall@k": sum(recalls) / n,
-        "mrr@k": sum(mrrs) / n,
+        "hit@k": _avg(all_hits),
+        "recall@k": _avg(all_recs),
+        "mrr@k": _avg(all_mrrs),
+        "by_type": {t: (_avg(h), _avg(r), _avg(m)) for t, (h, r, m) in buckets.items()},
         "details": details,
         "neg_hits": neg_hits,
     }
@@ -339,9 +433,9 @@ def print_details(results, eval_set):
     print("📋 逐条命中明细（列表为 Top-3 命中顺序，✅/❌ 看是否命中期望）")
     print("=" * 78)
 
-    pos = [(q, e) for q, e in eval_set if e]
-    for qi, (query, expected) in enumerate(pos):
-        print(f"\n🔍 {query}")
+    pos = [(q, e, t) for q, e, t in eval_set if e]
+    for qi, (query, expected, qtype) in enumerate(pos):
+        print(f"\n🔍 [{qtype}] {query}")
         print(f"   期望命中: {expected}")
         for res in results:
             _, _, got, hit = res["details"][qi]
@@ -367,7 +461,7 @@ def main():
         print(f"⏳ 评估 {name} ...")
         results.append(evaluate(name, fn, eval_set))
 
-    n_pos = len([e for _, e in eval_set if e])
+    n_pos = len([e for _, e, _ in eval_set if e])
     print("\n" + "=" * 78)
     print(f"📊 检索质量对比（语料 {len(CORPUS)} 条，K={TOP_K}，候选池={CANDIDATE_K}，正样本 {n_pos} 条）")
     print("=" * 78)
@@ -383,9 +477,22 @@ def main():
         d_mrr = res["mrr@k"] - baseline["mrr@k"]
         print(f"   {res['name']} vs baseline: Hit {d_hit:+.1%}, Recall {d_rec:+.1%}, MRR {d_mrr:+.3f}")
 
+    # 分类型报表：总体打平时，看各类查询（= 各压测机制）上谁占优
+    type_names = sorted({t for res in results for t in res["by_type"]})
+    print("\n📊 分类型 Hit@3 / Recall@3（类别与压测机制的对应见 EVAL_SET 注释）")
+    print("-" * 78)
+    print(f"{'type':<14}" + "".join(f"{res['name']:>24}" for res in results))
+    for t in type_names:
+        row = f"{t:<14}"
+        for res in results:
+            m = res["by_type"].get(t)
+            row += f"{m[0]:>12.0%}/{m[1]:<11.0%}" if m else f"{'--':>24}"
+        print(row)
+    print("-" * 78)
+
     print_details(results, eval_set)
 
-    neg_queries = [q for q, e in eval_set if not e]
+    neg_queries = [q for q, e, _ in eval_set if not e]
     if neg_queries:
         print("\n" + "=" * 78)
         print(f"🚫 负样本表现（{len(neg_queries)} 条无答案查询，看各配置误命中什么）")

@@ -115,31 +115,47 @@ uv run python rag_retrieval_lab.py
 3. **hybrid+rerank 与单独 rerank 打平**：reranker 足够强时，初检多召回的候选被它重新排序吸收，混合检索的边际贡献消失。说明工程上"向量 Top-N + reranker"往往就是性价比最高的组合。
 4. **数据量决定能否看出差异**：上一版只有 8 条时 Hit/Recall 全饱和在 100%，只能靠 MRR 挤牙膏；扩到 56 条并加入硬负例后，差距才真实显现。检索实验的信噪比，首先取决于语料规模与负例质量。
 
-> 诚实提示：个别"多答案"查询（如"中文Embedding模型有哪些"期望 4 篇）受 Top-3 坑位限制，Recall@3 有 75% 的结构性天花板，并非检索失败。
+> 设计约束：评测集里每条 expected 数量都不超过 Top-3 坑位数——期望数一旦超过 K，Recall@k 就有结构性天花板（如期望 4 篇时最高 0.75），那是指标失真而非检索失败。校验闸门会强制拦截这类条目。
 
-### 自动生成评测集（RAGAS + GLM-4.5-Air）
+### 评测集设计：内置手写为基准，RAGAS 生成仅为实验路径
 
-手写 `EVAL_SET` 是瓶颈：语料一扩充，人工标注 ground truth 就跟不上。`gen_evalset.py` 用 [RAGAS](https://docs.ragas.io) 从 CORPUS 自动生成问答评测集：
+`rag_retrieval_lab.py` 的评测集经历了一次方向修正（过程见踩坑 15）：**内置 `EVAL_SET` 是唯一可信基准**，RAGAS 自动生成降级为实验路径。
+
+内置评测集的设计原则：
+
+1. **人工逐条校订 ground truth**——自动标签实测 30/30 系统性错标，评测集宁可少而准（现 28 正 + 3 负）；
+2. **每条带 type 标注，每类查询压测一种检索机制**：`keyword`（精确术语，BM25 应占优）/ `paraphrase`（语义改写，向量应占优）/ `interference`（词面干扰硬负例，reranker 应占优）/ `multi-doc`（聚合对比）/ `factual`（基础盘）/ `negative`（库外问题，考察误命中）。总体指标打平时，分类型报表仍能定位各配置在哪类查询上占优；
+3. **expected 数量 ≤ TOP_K**——否则 Recall@3 被结构性封顶（期望 4 篇最高只能 0.75），指标失真而非检索差；
+4. **加载闸门**：内置与外部 evalset.json 一律过 `validate_eval_set()` 校验（未知 doc_id / 超过 TOP_K / 空 query 直接剔除并红字报错），杜绝坏标签静默产出假指标；
+5. **复现零 API 依赖**：`git clone` → `uv sync` → `uv run python rag_retrieval_lab.py`，全程不出网（模型走本地缓存/镜像）。
+
+RAGAS 路径（`gen_evalset.py`）保留作实验，但其产出必须人工校订后才可入评测集。
+
+### 自动生成评测集（RAGAS + GLM，⚠️ 实验路径，产出需人工校订）
+
+手写 `EVAL_SET` 的瓶颈在规模：语料一扩充，人工标注跟不上。`gen_evalset.py` 用 [RAGAS](https://docs.ragas.io) 从 CORPUS 自动生成问答评测集：
 
 ```powershell
 # 推荐：项目根建 .env 文件（已被 .gitignore 忽略），内容一行：
 #   ZHIPUAI_API_KEY=你的key
 # 然后直接运行：
 uv run python gen_evalset.py            # 默认生成 30 题，产出 evalset.json
-uv run python rag_retrieval_lab.py      # 自动检测并加载 evalset.json
+uv run python rag_retrieval_lab.py      # 自动检测并加载 evalset.json（过校验闸门）
 ```
 
 > ⚠️ 别用 `set ZHIPUAI_API_KEY=xxx`：在 PowerShell 里 `set` 是 `Set-Variable` 别名，只建了脚本内变量，不会成为环境变量，子进程读不到（实测踩坑，见第 12 条）。临时设置要用 `$env:ZHIPUAI_API_KEY="xxx"`，且只对当前终端会话生效。
+
+> ⚠️ 实测该路径产出的评测集**不能直接用**：ground truth 曾 30/30 错标、23/30 题目是英文（模板语言所致），详见踩坑 15。lab 的校验闸门只能拦截"引用不存在的 doc_id"这类硬错误，**拦不住语义层面的错标**。
 
 分工设计（对应"出题用强模型、跑实验用本地模型"的原则）：
 
 | 环节 | 模型 | 位置 |
 |---|---|---|
-| 出题（知识图谱抽取、问题进化） | GLM-4.5-Air（智谱 API） | 云端，一次性 |
+| 出题（知识图谱抽取、问题进化） | glm-4-flash（智谱 API，可用 `GLM_MODEL` 换） | 云端，一次性 |
 | 问题去重/聚类 | bge-small-zh | 本地，复用已有 |
 | 日常检索实验 | 无 LLM（纯检索） | 全本地 |
 
-生成结果固化成 `evalset.json` 后，日常实验不再碰 API。`reference_contexts` 通过原文子串匹配映射回 `doc_id`，映射失败的条目直接丢弃，保证每条 ground truth 可信。负样本（知识库无答案的问题）RAGAS 不产，继续手工维护在 `NEGATIVE_QUERIES`。
+生成结果固化成 `evalset.json` 后，日常实验不再碰 API。`reference_contexts` 通过原文子串匹配映射回 `doc_id`（收集全部匹配，不做 first-hit 短路——踩坑 15 的事故根源就是这里短路），映射失败的条目直接丢弃。负样本（知识库无答案的问题）RAGAS 不产，继续手工维护在 `NEGATIVE_QUERIES`。
 
 ## 配置项（环境变量）
 
@@ -320,6 +336,18 @@ Demo 2 里 `如何给Agent添加长期记忆？` 检索是对的（命中文档 
 正解分在 44%~72% 之间浮动，**任何绝对阈值都会误杀**（例如取 0.55 会把第一题的正解全部滤掉，直接答不出）。而"与最佳命中差多少"这个相对关系稳定：有效区间是 (0.81, 0.94]，故取 0.85。
 
 实测效果：四题全部改为精准作答，编造与无关片段罗列同时消失（Q1 仍保留 3 条，因为它本就需要多文档）。**代价与局限要讲清楚**：0.85 是在这 4 条样本上标定的启发式值，不是验证过的最优解；语料或 Embedding 模型一换就需重新标定，并且它只对"单主题查询"有效——真正的多主题聚合查询会被它误伤。
+
+### 15. RAGAS 自动生成的评测集 30/30 错标：ground truth 必须人工校订
+
+按"出题用强模型"的思路接入 RAGAS + GLM 后，生成流程顺利跑通（换 `glm-4-flash` 后 30 题 0 丢弃、约 4 分钟），但产出的评测集**不能直接用**，两个致命问题：
+
+**问题一：ground truth 30/30 系统性错标（映射代码 bug，可修）。** 现象：问 CrewAI 的题被标到 `d_langgraph`，问 Milvus/HNSW 被标到 `d_chroma`——全部 30 条都错标成"该主题在 CORPUS 里的第一条"。根因是 `contexts_to_doc_ids` 里命中一条就 `break`：RAGAS 返回的 reference_contexts 是整篇合并文档（含主题下每一句原文），本应收集全部匹配得到整组 member_id，一旦 first-hit 短路就塌缩成第一条。修复为收集全部匹配。
+
+**问题二：23/30 的题目是英文（模板性缺陷，难修）。** 语料是中文、Embedding 是 bge-small-zh、BM25 是中文单字分词，英文 query 打中文语料得到的指标没有意义。根因是 RAGAS 的 synthesizer prompt 模板是英文的，模型照模板出题；要出中文题需自定义中文 prompt，属于改 RAGAS 内部行为。另外 `multi_hop_abstract` 类问题语义牵强（"FastAPI 如何应对短期记忆挑战"这类概念嫁接），质量明显低于单跳题。
+
+**更深一层的教训**：校验闸门（查 doc_id 是否存在）拦得住"引用不存在的 id"，**拦不住"标签语义就错了"**——错标的 id 都真实存在，只是张冠李戴。自动生成评测集的瓶颈从来不是生成，是**校订成本**；没有人工校订环节的自动标签，规模越大污染越快。
+
+**最终取向**：评测集回到人工设计（内置 `EVAL_SET`，带 type 分类标注，见"评测集设计"一节）；RAGAS 路径保留作实验，产出必须人工校订后才能使用。复现实验的路径因此变成零 API 依赖的 `git clone` → `uv sync` → `uv run`。
 
 ## 常见问题
 

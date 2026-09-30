@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-评测集生成器 - RAGAS + GLM-4.5-Air（智谱 OpenAI 兼容接口）
+评测集生成器 - RAGAS + GLM（智谱 OpenAI 兼容接口）
 
 一次性离线动作：读 rag_retrieval_lab 的 CORPUS -> RAGAS 自动生成问答 ->
 映射回 doc_id -> 写 evalset.json，供 rag_retrieval_lab.py 自动加载。
@@ -49,10 +49,14 @@ from ragas.testset import TestsetGenerator  # noqa: E402
 # 复用 lab 的语料定义（rag_retrieval_lab 已做轻量 import 设计，此处不触发模型加载）
 from rag_retrieval_lab import CORPUS
 
-# 智谱 OpenAI 兼容接口；GLM-4.5-Air 是 Air 版（3.5B 激活参数），性价比取向
-# 模型 id 以智谱开放平台为准，可用环境变量 GLM_MODEL 覆盖
+# 智谱 OpenAI 兼容接口。
+# 默认用 glm-4-flash（非推理模型）：glm-4.5-air 属推理模型，thinking token 会
+# 吃满输出预算，导致 JSON 被截断、finish_reason="length"，而 ragas 的白名单只认
+# stop/MAX_TOKENS/eos_token，会全线抛 LLMDidNotFinishException（机制见 README
+# 配置项表的 GLM_MAX_TOKENS 行；换模型省钱的决策见踩坑 15）。
+# 模型 id 以智谱开放平台为准，可用环境变量 GLM_MODEL 覆盖。
 GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-GLM_MODEL = os.getenv("GLM_MODEL", "glm-4.5-air")
+GLM_MODEL = os.getenv("GLM_MODEL", "glm-4-flash")
 
 # 负样本：知识库中不存在答案的问题，检验系统"该拒答时是否误命中"。
 # RAGAS 只造正样本，负样本继续手工维护（这类样本靠人对领域的理解）。
@@ -104,6 +108,11 @@ def contexts_to_doc_ids(contexts):
     匹配规则：片段是某条语料的子串，或某条语料包含片段（切块可能截断）。
     返回去重后的 doc_id 集合；一条都匹配不上则返回空集合（该条会被丢弃）。
 
+    注意：这里必须"收集全部匹配"而不是命中一条就 break。若 context 是整篇
+    合并文档（粗粒度），它会包含该主题下每一句原文，收集全部才能得到整组
+    member_id；一旦 break，就会塌缩成"该主题在 CORPUS 里的第一条"，把问
+    CrewAI 的题错标到 d_langgraph 这类完全不相干的 id 上（实测 30/30 全错）。
+
     粒度探针意义：文档已按主题合并，若 RAGAS 返回整篇合并文档作为 context，
     这里会命中该主题的多个 member_id（粗粒度）；若返回单句，只命中一个（细粒度）。
     命中的 id 数直接反映 context 粒度。
@@ -116,7 +125,6 @@ def contexts_to_doc_ids(contexts):
         for doc_id, _, text in CORPUS:
             if ctx in text or text in ctx:
                 ids.add(doc_id)
-                break
     return ids
 
 
@@ -174,8 +182,8 @@ def generate(size: int, probe: bool = False):
         )
 
     print(f"🔌 出题模型：{GLM_MODEL} @ {GLM_BASE_URL}")
-    # max_tokens 必须给足：GLM-4.5-Air 是推理模型，thinking token 会吃掉输出预算，
-    # 默认上限下 JSON 答案被截断 -> finish_reason="length" -> ragas 判为未完成，
+    # max_tokens 给足是必要的：若换成推理类模型（如 glm-4.5-air），thinking token
+    # 会吃掉输出预算，JSON 答案被截断 -> finish_reason="length" -> ragas 判为未完成，
     # 抛 LLMDidNotFinishException（其白名单只认 stop/MAX_TOKENS/eos_token）。
     llm = LangchainLLMWrapper(
         ChatOpenAI(
