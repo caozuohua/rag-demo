@@ -16,7 +16,7 @@ RAG 检索优化实验 - reranker + BM25 混合检索
   MRR@k     第一个命中的倒数排名（衡量"命中得早不早"）
 
 与 rag_demo_llamaindex.py 的关系：
-  本实验自带一份约 56 条的更大语料（含大量"硬负例"——与答案共享词汇
+  本实验自带一份约 100 条的更大语料（含大量"硬负例"——与答案共享词汇
   但并非答案的文档），建到独立的索引目录，不复用也不影响 demo 的 8 条。
   候选池远大于 Top-K 后，Recall 才有下降空间，四种配置的差距才显现。
 
@@ -84,7 +84,7 @@ RELATIVE_RATIOS = [0.0, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
 ABSOLUTE_FLOORS = [0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
 
 # ============================================================
-# 语料库（约 56 条，覆盖 10 个主题簇，故意制造跨簇/簇内硬负例）
+# 语料库（100 条，覆盖 13 个主题簇，故意制造跨簇/簇内硬负例）
 # 每条：id / topic（展示用）/ text
 # ============================================================
 
@@ -96,12 +96,20 @@ CORPUS = [
     ("d_semantickernel", "Agent框架", "Semantic Kernel是微软的轻量级Agent编排SDK，以插件和函数为核心，深度集成.NET生态。"),
     ("d_llamaindex", "Agent框架", "LlamaIndex是数据框架，核心是把外部数据接入LLM，提供索引、检索器、查询引擎，也支持Agent与工作流。"),
     ("d_langchain", "Agent框架", "LangChain是LLM应用开发框架，用链串联模型、工具、检索器，生态最全但抽象层次较多。"),
+    ("d_pydanticai", "Agent框架", "PydanticAI是Pydantic团队推出的Agent框架，用类型安全的结构化输出定义Agent，与FastAPI同源生态。"),
+    ("d_metagpt", "Agent框架", "MetaGPT把SOP（标准作业程序）编码进多Agent流程，产品经理、架构师、工程师按软件公司流程协作产出代码。"),
+    ("d_smolagents", "Agent框架", "smolagents是Hugging Face的轻量Agent库，核心是CodeAgent——让模型直接写代码作为动作，减少JSON解析开销。"),
+    ("d_agentsdk", "Agent框架", "OpenAI Agents SDK是OpenAI开源的轻量Agent框架，提供Handoffs任务转交、Guardrails护栏和Tracing追踪，是Swarm的生产化继任者。"),
     # --- 推理算法 ---
     ("d_react", "推理算法", "ReAct算法：Reasoning加Acting循环。思考、行动、观察、再思考。适合探索性任务，灵活性高。"),
     ("d_planexecute", "推理算法", "Plan-and-Execute算法：先规划生成步骤列表，再逐步执行。适合长流程任务，效率高但灵活性低于ReAct。"),
     ("d_reflexion", "推理算法", "Reflexion通过自我反思改进：执行失败后生成语言化的反思记忆，指导下一次尝试，无需更新模型权重。"),
     ("d_tot", "推理算法", "Tree-of-Thought把推理组织成树，每个节点是一个中间想法，可展开、回溯，用BFS或DFS搜索最优路径。"),
     ("d_cot", "推理算法", "Chain-of-Thought提示让模型分步骤推理，通过示例或一步步想触发，提升复杂推理任务的准确率。"),
+    ("d_selfrefine", "推理算法", "Self-Refine让模型对自己的输出做反馈再修改，多轮自我迭代提升质量，同样无需额外训练。"),
+    ("d_got", "推理算法", "Graph-of-Thought把推理从树扩展成图，想法之间可以合并与聚合，适合需要综合多个思路的任务。"),
+    ("d_debate", "推理算法", "多Agent辩论让多个模型实例就同一问题给出不同答案并互相批判，几轮后取收敛结论，能减少单模型的偏见与错误。"),
+    ("d_bestofn", "推理算法", "Best-of-N采样一次生成N个候选答案，再用奖励模型或判别器挑最好的一个，推理时用算力换质量。"),
     # --- 向量数据库 ---
     ("d_chroma", "向量数据库", "Chroma是本地轻量的开源向量数据库，嵌入式部署，适合原型和小规模RAG，Python原生。"),
     ("d_milvus", "向量数据库", "Milvus是企业级分布式向量数据库，支持海量向量和HNSW、IVF等多种索引类型，需要独立部署。"),
@@ -111,6 +119,9 @@ CORPUS = [
     ("d_weaviate", "向量数据库", "Weaviate是带GraphQL的开源向量数据库，支持多租户、模块化向量化器和混合检索。"),
     ("d_pinecone", "向量数据库", "Pinecone是全托管的云向量数据库，免运维、支持大规模，按用量付费，非开源自部署。"),
     ("d_pgvector", "向量数据库", "pgvector是PostgreSQL的向量扩展，把向量存进关系表，可与业务数据一起用SQL查询。"),
+    ("d_opensearch", "向量数据库", "OpenSearch是AWS主导的开源搜索套件，k-NN插件支持向量检索，适合已有ES运维体系的团队。"),
+    ("d_vespa", "向量数据库", "Vespa是Yahoo开源的搜索与推理引擎，原生支持向量、文本、结构化数据的混合排序，大规模在线服务经验深厚。"),
+    ("d_redis", "向量数据库", "Redis通过向量相似度搜索模块支持KNN检索，内存级速度，常作为已有Redis栈的轻量向量方案。"),
     # --- Embedding 模型 ---
     ("d_bge_small", "Embedding", "bge-small-zh-v1.5是智源中文向量模型，约100MB，CPU可跑，适合中文短文本语义检索。"),
     ("d_bge_large", "Embedding", "bge-large-zh-v1.5是bge-large中文向量模型，约1.2GB，检索质量更高但CPU推理较慢。"),
@@ -119,15 +130,25 @@ CORPUS = [
     ("d_e5", "Embedding", "E5是微软的多语言向量模型，查询和文档需加不同前缀query和passage以获得最佳效果。"),
     ("d_gte", "Embedding", "GTE是阿里的通用文本向量模型，有base和large多尺寸，MTEB榜单中文表现优秀。"),
     ("d_minilm", "Embedding", "all-MiniLM-L6-v2是sentence-transformers英文为主的轻量向量模型，约90MB，中文效果一般。"),
+    ("d_bge_m3", "Embedding", "BGE-M3是智源的多语言向量模型，一个模型同时支持稠密、稀疏和多向量三种检索，长文本支持到8192 token。"),
+    ("d_jina", "Embedding", "Jina Embedding v3支持8192上下文，按检索、聚类、分类等任务加载不同适配器，多语言表现好。"),
+    ("d_voyage", "Embedding", "Voyage AI是专注检索优化的商用Embedding服务，有code和领域专用型号，RAG检索榜单表现强。"),
     # --- 本地推理 / 模型 ---
     ("d_qwen", "本地模型", "Qwen2.5是阿里开源大模型，有0.5B、1.5B、3B、7B等规格，中文优化好，提供Instruct和Base版本。"),
     ("d_llama3", "本地模型", "Llama3是Meta开源大模型，有8B和70B，英文能力强，中文需额外微调或选社区中文版。"),
+    ("d_gemma", "本地模型", "Gemma是Google开源的轻量模型系列，有2B、9B等规格，与Gemini同源技术，授权宽松适合本地部署。"),
+    ("d_phi", "本地模型", "Phi系列是微软的小模型，用高质量教科书式数据训练，小体积在推理基准上超出同尺寸水平。"),
+    ("d_deepseek", "本地模型", "DeepSeek是深度求索开源的大模型系列，V3和R1以极低训练成本达到强性能，R1通过强化学习产生长链推理能力。"),
+    ("d_glm", "本地模型", "GLM是智谱开源的对话模型系列，提供从9B到130B的多种规格，中英双语能力强。"),
     ("d_vllm", "推理引擎", "vLLM是高吞吐LLM推理引擎，用PagedAttention管理KV缓存，支持连续批处理，适合GPU服务化部署。"),
     ("d_llamacpp", "推理引擎", "llama.cpp是C++实现的LLM推理引擎，支持CPU和Metal，运行GGUF量化模型，适合本地无GPU部署。"),
     ("d_ollama", "推理引擎", "Ollama是本地大模型一键运行工具，封装llama.cpp，用Modelfile管理模型，提供REST API。"),
     ("d_gguf", "推理引擎", "GGUF是llama.cpp使用的模型量化格式，常见量化档Q4_K_M在体积和质量间取得平衡。"),
     ("d_kvcache", "推理引擎", "KV缓存缓存注意力层的Key和Value避免重复计算，长上下文时显存占用主要来自KV缓存。"),
     ("d_quantization", "推理引擎", "量化把模型权重从FP16降到INT8或INT4，显存和体积减半以上，代价是轻微精度损失。"),
+    ("d_tensorrtllm", "推理引擎", "TensorRT-LLM是NVIDIA的LLM推理优化库，把模型编译成TensorRT引擎，GPU吞吐领先但绑定NVIDIA生态。"),
+    ("d_sglang", "推理引擎", "SGLang是高性能LLM推理引擎，以RadixAttention共享前缀KV缓存著称，结构化生成与批处理能力强。"),
+    ("d_mlx", "推理引擎", "MLX是Apple的机器学习框架，Apple Silicon上GPU原生加速，是Mac本地跑模型的常用后端。"),
     # --- RAG 技术 ---
     ("d_rag_flow", "RAG技术", "RAG检索增强生成流程：文档切分、Embedding、存入向量库、提问、检索TopK、LLM结合上下文生成，解决知识截止和幻觉。"),
     ("d_chunking", "RAG技术", "文本切块把长文档切成适合Embedding的片段，chunk_size和overlap是关键参数，影响检索粒度。"),
@@ -137,24 +158,49 @@ CORPUS = [
     ("d_rageval", "RAG技术", "RAG评估常用指标：检索侧的Hit、Recall、MRR，生成侧的忠实度、相关性、答案正确性。"),
     ("d_hallucination", "RAG技术", "幻觉指LLM生成与事实或给定上下文不符的内容，RAG通过提供检索上下文可显著缓解。"),
     ("d_queryrewrite", "RAG技术", "查询改写用LLM把用户问题改写成多个变体或更规范的检索query，提升召回。"),
+    ("d_hyde", "RAG技术", "HyDE让LLM先生成一个假设性答案，用假设答案去检索，再让LLM基于真实文档作答，缓解查询与文档的语义鸿沟。"),
+    ("d_parentchild", "RAG技术", "父子块检索是检索小块、返回大块：用细粒度小块精确匹配，命中后把它所属的大块（父块）喂给LLM，兼顾精度与上下文完整。"),
+    ("d_sentencewindow", "RAG技术", "句子窗口检索把文档拆成单句建索引，命中某句后把它前后若干句一起返回，平衡检索精度与上下文丰富度。"),
+    ("d_colbert", "RAG技术", "ColBERT用后期交互：文档和查询都存token级向量，检索时做token级最大相似度聚合，比单向量精度高、比cross-encoder快。"),
+    ("d_multimodalrag", "RAG技术", "多模态RAG把图表、图片等非文本内容纳入检索，可用多模态Embedding直接索引，或用视觉模型把图像转成文字摘要再索引。"),
     # --- 记忆 ---
     ("d_shortmem", "记忆", "短期记忆通常指对话上下文窗口内的历史消息，随会话增长会溢出，需要截断或摘要。"),
     ("d_longmem", "记忆", "Agent长期记忆把重要信息向量化持久化到外部存储，跨会话检索召回，弥补上下文窗口有限。"),
     ("d_kgmem", "记忆", "知识图谱记忆用实体关系三元组组织Agent记忆，支持结构化查询和多跳关联。"),
     ("d_summarymem", "记忆", "对话摘要记忆把历史消息压缩成摘要再放入上下文，用更少token保留关键信息。"),
+    ("d_memgpt", "记忆", "MemGPT借鉴操作系统虚拟内存思想，让LLM自己管理主上下文与外部存储间的换页，突破上下文窗口限制，后演化为Letta。"),
+    ("d_memoryhierarchy", "记忆", "Agent记忆常分层设计：工作记忆放当前上下文，情景记忆存交互历史，语义记忆存提炼后的知识与偏好，各层用不同存储与检索策略。"),
     # --- 提示 / 结构化输出 ---
     ("d_fewshot", "提示工程", "Few-shot提示在prompt里给几个输入输出示例，让模型模仿格式，无需训练即可引导行为。"),
     ("d_structured", "提示工程", "结构化输出约束模型按JSON Schema生成，便于下游程序解析，可用function calling或JSON mode实现。"),
     ("d_systemprompt", "提示工程", "系统提示定义模型的角色、规则和边界，优先级通常高于用户消息。"),
+    ("d_selfconsistency", "提示工程", "Self-Consistency让模型对同一问题采样多条推理路径，取多数一致的答案，用计算换准确率，适合有确定答案的任务。"),
+    ("d_promptchain", "提示工程", "提示链把复杂任务拆成多个串联的提示步骤，每步专注一件事并把输出传给下一步，降低单提示的失败率。"),
     # --- 微调 ---
     ("d_lora", "微调", "LoRA冻结原模型权重，只训练低秩旁路矩阵，显存和存储需求大幅下降，可插拔。"),
     ("d_qlora", "微调", "QLoRA在4位量化的基座模型上叠加LoRA，单卡即可微调大模型。"),
     ("d_fullft", "微调", "全参数微调更新所有权重，效果上限高但显存和算力成本最高，易在小数据上过拟合。"),
     ("d_dpo", "微调", "DPO直接偏好优化，用偏好对训练模型，比RLHF流程更简单稳定。"),
+    ("d_rlhf", "微调", "RLHF用人类偏好数据训练奖励模型，再用强化学习优化策略模型，是让模型对齐人类偏好的经典路线。"),
+    ("d_peft", "微调", "PEFT是参数高效微调方法的统称，只训练少量附加参数（LoRA、prefix tuning等），大幅降低大模型微调成本。"),
+    ("d_kto", "微调", "KTO用二元的好坏信号替代成对偏好数据做对齐训练，标注成本低于DPO。"),
     # --- 部署 ---
     ("d_fastapi", "部署", "FastAPI是异步Python Web框架，常用于把LLM或RAG服务封装成REST接口，自动生成OpenAPI文档。"),
     ("d_streaming", "部署", "流式输出用SSE或WebSocket让LLM逐token返回，降低首字延迟，改善交互体验。"),
     ("d_docker", "部署", "Docker把应用和依赖打包成镜像，保证环境一致，是LLM服务部署的常见方式。"),
+    ("d_k8s", "部署", "Kubernetes负责容器编排，提供扩缩容、自愈和滚动更新，是LLM服务生产部署的常见底座。"),
+    ("d_triton", "部署", "Triton Inference Server是NVIDIA的模型服务组件，支持多后端、动态批处理和并发模型执行。"),
+    # --- 评测 ---
+    ("d_ragastool", "评测", "RAGAS是RAG自动化评测框架，用LLM从忠实度、答案相关性、上下文精确率等维度打分，也支持合成测试集。"),
+    ("d_trulens", "评测", "TruLens提供RAG应用的反馈函数评估，可追踪并评估检索质量与生成质量，支持渐进式调试。"),
+    ("d_deepeval", "评测", "DeepEval是类似pytest的LLM评测框架，把评测当单元测试写，内置幻觉、忠实度等指标。"),
+    ("d_langsmith", "评测", "LangSmith是LangChain的观测与评测平台，追踪每次调用链路，支持数据集管理与在线评估。"),
+    ("d_phoenix", "评测", "Arize Phoenix是开源的LLM可观测性工具，提供tracing、评估和检索分析，兼容OpenTelemetry标准。"),
+    # --- 文档解析 ---
+    ("d_unstructured", "文档解析", "Unstructured是文档解析库，把HTML、PDF、Word等转成统一的结构化元素，是RAG数据管道常用的前置处理。"),
+    ("d_mineru", "文档解析", "MinerU是开源的PDF解析工具，能还原标题层级、表格和公式并输出Markdown，适合把论文和报告喂给RAG。"),
+    ("d_docling", "文档解析", "Docling是IBM开源的文档解析库，支持PDF、Office等格式，能识别表格结构并输出多种格式。"),
+    ("d_ocr", "文档解析", "扫描件PDF没有文本层，需要OCR识别，PaddleOCR等开源方案支持中文，识别质量决定RAG的源头数据质量。"),
 ]
 
 # ============================================================
@@ -181,24 +227,37 @@ EVAL_SET = [
     ("Q4_K_M是什么量化档位", ["d_gguf"], "keyword"),
     ("HNSW和IVF是哪类索引", ["d_milvus"], "keyword"),
     ("RRF是怎么融合两路检索结果的", ["d_hybrid"], "keyword"),
+    ("Best-of-N是什么采样策略", ["d_bestofn"], "keyword"),
+    ("SGLang靠什么技术共享前缀缓存", ["d_sglang"], "keyword"),
     # --- paraphrase：语义改写，与答案几乎无词面重叠（考察向量语义检索） ---
-    ("本地没有GPU怎么跑大模型", ["d_llamacpp"], "paraphrase"),
+    # 地面真值随语料扩充同步维护：本地模型簇扩到 6 条后，ollama（封装 llama.cpp、
+    # 同样纯 CPU 可跑）成为该问题同等合法的答案，一并计入期望
+    ("本地没有GPU怎么跑大模型", ["d_llamacpp", "d_ollama"], "paraphrase"),
     ("怎么评估检索质量", ["d_rageval"], "paraphrase"),
     ("两阶段检索的第二阶段是什么", ["d_rerank"], "paraphrase"),
     ("长文档怎么切分成片段", ["d_chunking"], "paraphrase"),
     ("对话历史太长装不下怎么办", ["d_summarymem", "d_shortmem"], "paraphrase"),
     ("怎么让模型按程序能解析的格式输出", ["d_structured"], "paraphrase"),
     ("希望Agent记住用户偏好、跨会话仍能想起，该怎么做", ["d_longmem"], "paraphrase"),
+    ("扫描版PDF没有文字层怎么处理", ["d_ocr"], "paraphrase"),
+    ("假设性答案也能用来做检索吗", ["d_hyde"], "paraphrase"),
+    ("让模型采样多条推理路径然后投票", ["d_selfconsistency"], "paraphrase"),
+    ("Mac上本地跑模型一般用什么框架", ["d_mlx"], "paraphrase"),
+    ("把LLM评测当单元测试写的是什么框架", ["d_deepeval"], "paraphrase"),
     # --- interference：词面干扰，同簇/跨簇硬负例密集（考察 reranker 排序纠偏） ---
     ("量化一定损失精度吗", ["d_quantization"], "interference"),
     ("KV缓存为什么会占大量显存", ["d_kvcache"], "interference"),
     ("AutoGen和Semantic Kernel分别是谁推出的", ["d_autogen", "d_semantickernel"], "interference"),
     ("bge-small-zh和m3e哪个更适合中文短文本", ["d_bge_small", "d_m3e"], "interference"),
+    ("TruLens的反馈函数评估是什么", ["d_trulens"], "interference"),
     # --- multi-doc：跨文档聚合对比（考察 Top-K 覆盖能力） ---
     ("LangGraph和CrewAI有什么区别", ["d_langgraph", "d_crewai"], "multi-doc"),
     ("ReAct和Plan-and-Execute哪个更灵活", ["d_react", "d_planexecute"], "multi-doc"),
     ("LoRA和全参数微调的区别", ["d_lora", "d_fullft"], "multi-doc"),
     ("RAG能解决大模型的哪些问题", ["d_rag_flow", "d_hallucination"], "multi-doc"),
+    ("想让检索又准又能带上前后文怎么办", ["d_parentchild", "d_sentencewindow"], "multi-doc"),
+    ("KTO和DPO有什么区别", ["d_kto", "d_dpo"], "multi-doc"),
+    ("Gemma和Phi分别是哪家的小模型", ["d_gemma", "d_phi"], "multi-doc"),
     # --- factual：单文档事实题（基础盘） ---
     ("AutoGen是什么框架", ["d_autogen"], "factual"),
     ("Qwen2.5有哪些规格", ["d_qwen"], "factual"),
@@ -209,10 +268,17 @@ EVAL_SET = [
     ("vLLM靠什么技术提高吞吐", ["d_vllm"], "factual"),
     ("智源开源的中文Embedding模型有哪些", ["d_bge_small", "d_bge_large"], "factual"),
     ("E5模型使用时要注意什么", ["d_e5"], "factual"),
+    ("MetaGPT的设计思想是什么", ["d_metagpt"], "factual"),
+    ("BGE-M3一个模型支持哪几种检索", ["d_bge_m3"], "factual"),
+    ("PEFT指什么", ["d_peft"], "factual"),
+    ("DeepSeek-R1的推理能力是怎么训练出来的", ["d_deepseek"], "factual"),
+    ("RAGAS评RAG都看哪些维度", ["d_ragastool"], "factual"),
     # --- negative：负样本，知识库无答案（考察各配置会不会误命中） ---
     ("今天天气怎么样", [], "negative"),
     ("推荐一部最近上映的电影", [], "negative"),
     ("红烧肉怎么做好吃", [], "negative"),
+    ("1加1等于几", [], "negative"),
+    ("帮我写一首关于春天的诗", [], "negative"),
 ]
 
 
@@ -486,6 +552,10 @@ def run_threshold_sweep(index, eval_set):
                 break
         return hit, len(matched) / len(expected), rr
 
+    # 负样本相关分母动态计算（负样本条数可变，别把展示用的 /3、/9 写死）
+    n_neg = sum(1 for _, e, _, _ in cached if not e)
+    n_neg_pairs = TOP_K * n_neg
+
     # ---- 维度 1：相对比例（Demo 2 的 SCORE_GAP_RATIO） ----
     print("\n" + "=" * 78)
     print("📐 相对阈值扫描：保留 score >= ratio * top1（ratio=0.00 即未过滤的 baseline A）")
@@ -510,7 +580,7 @@ def run_threshold_sweep(index, eval_set):
         n = len(hits)
         multi = sum(multi_recs) / len(multi_recs) if multi_recs else 0.0
         print(f"{ratio:>6.2f}{sum(hits)/n:>9.1%}{sum(recs)/n:>11.1%}"
-              f"{sum(mrrs)/n:>9.3f}{multi:>11.1%}{neg_pairs:>8}/9")
+              f"{sum(mrrs)/n:>9.3f}{multi:>11.1%}{neg_pairs:>6}/{n_neg_pairs}")
 
     # ---- 维度 2：绝对门槛（top1 < floor 整题拒答） ----
     print("\n" + "=" * 78)
@@ -535,7 +605,7 @@ def run_threshold_sweep(index, eval_set):
             mrrs.append(m)
         n = len(hits)
         print(f"{floor:>6.2f}{sum(hits)/n:>9.1%}{sum(recs)/n:>11.1%}{sum(mrrs)/n:>9.3f}"
-              f"{false_reject:>9}/{n}{neg_rejected:>7}/3{neg_pairs:>8}/9")
+              f"{false_reject:>9}/{n}{neg_rejected:>7}/{n_neg}{neg_pairs:>6}/{n_neg_pairs}")
 
     # ---- 分离度分析：绝对门槛是否存在完美分离点 ----
     pos_top1 = [rs[0][1] for _, e, _, rs in cached if e and rs]
